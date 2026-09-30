@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'codex/**']
+    paths: ['pom.xml', 'tsgate-*/**', 'scripts/verify-release-artifacts.py', 'LICENSE', 'NOTICE', '.github/workflows/ci.yml']
+  pull_request:
+    paths: ['pom.xml', 'tsgate-*/**', 'scripts/verify-release-artifacts.py', 'LICENSE', 'NOTICE', '.github/workflows/ci.yml']
+  workflow_dispatch:
+    inputs:
+      run_docker:
+        description: Run the representative three-database Docker regression suite
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Temurin ${{ matrix.java }} / Spring Boot ${{ matrix.boot }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - java: '17.0.14'
+            boot: '2.7.18'
+            release: '--release-artifacts'
+          - java: '21.0.11'
+            boot: '3.5.14'
+            release: ''
+          - java: '25.0.2'
+            boot: '4.1.0'
+            release: ''
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+      - name: Verify the Temurin 17 release toolchain
+        if: matrix.release != ''
+        shell: bash
+        run: |
+          java -XshowSettings:properties -version 2> "$RUNNER_TEMP/tsgate-java-properties"
+          cat "$RUNNER_TEMP/tsgate-java-properties"
+          grep -Eq '^[[:space:]]*java.vendor = Eclipse Adoptium$' "$RUNNER_TEMP/tsgate-java-properties"
+          grep -Eq '^[[:space:]]*java.specification.version = 17$' "$RUNNER_TEMP/tsgate-java-properties"
+      - name: Release artifact verifier regression tests
+        if: matrix.release != ''
+        run: python3 -m unittest discover -s tsgate-core/src/test/scripts -p 'test_verify_release_artifacts.py'
+      - name: Unit tests and unsigned release artifacts with third-party license verification
+        run: >-
+          python3 tsgate-core/src/test/scripts/run-tests.py unit
+          --spring-boot '${{ matrix.boot }}' ${{ matrix.release }}
+      - name: Test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unit-jdk-${{ matrix.java }}-boot-${{ matrix.boot }}
+          path: .local-test/ci/
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: warn
+
+  docker:
+    name: Representative Docker integration tests
+    if: github.event_name == 'workflow_dispatch' && inputs.run_docker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17.0.14'
+          cache: maven
+      - name: Run unit tests and Docker regression tests
+        run: python3 tsgate-core/src/test/scripts/run-tests.py docker --spring-boot 2.7.18
+      - name: Test and database reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docker-jdk-17-boot-2.7.18
+          path: .local-test/ci/
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: warn

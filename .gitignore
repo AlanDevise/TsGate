@@ -1,0 +1,28 @@
+# Publish portable test sources; keep local fixtures, credentials and reports private.
+.local-test/
+
+# Build output and reports
+**/target/
+*.log
+__pycache__/
+*.py[cod]
+
+# IDE and OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Local configuration and credentials
+.env
+.env.*
+settings.xml
+settings.xml.*
+/.mvn/*settings*.xml*
+*.pem
+*.key
+
+# Publish only the root README translations; keep agent instructions and reports local.
+*.md
+!/README.md
+!/README.zh-CN.md

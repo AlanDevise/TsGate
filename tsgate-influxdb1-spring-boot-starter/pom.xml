@@ -1,0 +1,49 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.alandevise</groupId>
+        <artifactId>tsgate</artifactId>
+        <version>2.0.0</version>
+    </parent>
+
+    <artifactId>tsgate-influxdb1-spring-boot-starter</artifactId>
+    <packaging>jar</packaging>
+    <name>tsgate-influxdb1-spring-boot-starter</name>
+    <description>Spring Boot auto-configuration for the InfluxDB 1.x adapter</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.github.alandevise</groupId>
+            <artifactId>tsgate-influxdb1</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-autoconfigure</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-configuration-processor</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.github.alandevise</groupId>
+            <artifactId>tsgate-iotdb-spring-boot-starter</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.github.alandevise</groupId>
+            <artifactId>tsgate-influxdb3-spring-boot-starter</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

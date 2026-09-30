@@ -1,0 +1,27 @@
+[
+  {
+    "kind": "iotdb",
+    "image": "apache/iotdb:2.0.10-standalone",
+    "version": "2.0.10",
+    "port": 6667,
+    "platform": "linux/amd64",
+    "environment": {"MEMORY_SIZE": "512M", "dn_rpc_address": "0.0.0.0"},
+    "command": []
+  },
+  {
+    "kind": "influxdb1",
+    "image": "influxdb:1.13.1",
+    "version": "1.13.1",
+    "port": 8086,
+    "environment": {"INFLUXDB_REPORTING_DISABLED": "true"},
+    "command": []
+  },
+  {
+    "kind": "influxdb",
+    "image": "influxdb:3.11.5-core",
+    "version": "3.11.5",
+    "port": 8181,
+    "environment": {},
+    "command": ["influxdb3", "serve", "--node-id", "tsgate-ci", "--object-store", "memory", "--without-auth"]
+  }
+]
