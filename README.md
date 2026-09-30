@@ -109,6 +109,8 @@ TsGate's English and Chinese guides are available on the [GitHub Wiki](https://g
 
 [English guide](https://github.com/AlanDevise/TsGate/wiki/EN-Overview) · [简体中文指南](https://github.com/AlanDevise/TsGate/wiki/ZH-Overview)
 
+The [TsGate skill](SKILL.md) guides coding assistants through application integration and contributor maintenance, including API examples, module responsibilities, compatibility boundaries, tests and documentation updates. To use it, install this file in a `tsgate` skill directory recognized by your assistant, or explicitly ask the assistant to read it. Root-file discovery depends on the tool.
+
 Refer to each module's Javadoc for API contracts, configuration options, resource lifecycle and backend-specific limits.
 
 ## License

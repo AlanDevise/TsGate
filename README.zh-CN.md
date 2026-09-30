@@ -109,6 +109,8 @@ TsGate 的中英文使用指南位于 [GitHub Wiki](https://github.com/AlanDevis
 
 [English guide](https://github.com/AlanDevise/TsGate/wiki/EN-Overview) · [简体中文指南](https://github.com/AlanDevise/TsGate/wiki/ZH-Overview)
 
+[TsGate 技能](SKILL.md) 为编码助手提供业务接入与贡献开发两条工作流，涵盖 API 示例、模块职责、兼容边界、测试和文档同步。使用时，将该文件安装到所用助手识别的 `tsgate` 技能目录，或显式要求助手读取；能否自动发现根目录文件取决于具体工具。
+
 各模块的 Javadoc 提供 API 契约、配置选项、资源生命周期及后端特有限制的说明。
 
 ## 许可证

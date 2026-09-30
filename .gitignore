@@ -22,7 +22,8 @@ settings.xml.*
 *.pem
 *.key
 
-# Publish only the root README translations; keep agent instructions and reports local.
+# Publish README translations and the portable skill; keep local instructions and reports private.
 *.md
 !/README.md
 !/README.zh-CN.md
+!/SKILL.md
