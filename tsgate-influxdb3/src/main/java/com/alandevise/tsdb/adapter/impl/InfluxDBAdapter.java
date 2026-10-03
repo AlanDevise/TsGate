@@ -2,6 +2,7 @@ package com.alandevise.tsdb.adapter.impl;
 
 import com.alandevise.tsdb.util.TimeWindowDuration;
 import com.alandevise.tsdb.util.TimeWindowPlan;
+import com.alandevise.tsdb.util.TSDBQueryValidator;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.JsonParser;
@@ -105,6 +106,8 @@ public class InfluxDBAdapter implements TSDBAdapter {
 
     /**
      * Creates an InfluxDB adapter with configurable SQL logging.
+     * Configuration is copied at construction, including HTTP settings; later changes to the
+     * supplied properties do not reconfigure this adapter or its borrowed native client.
      *
      * @param config          connection settings, for example {@code url=http://localhost:8181, database=tsdb}
      * @param queryLogEnabled whether to log executed SQL at DEBUG level
@@ -113,6 +116,7 @@ public class InfluxDBAdapter implements TSDBAdapter {
      */
     public InfluxDBAdapter(InfluxDBProperties config,
                            boolean queryLogEnabled) {
+        config = snapshotConfiguration(config);
         this.config = config;
         this.maxBatchRecords = resolveMaxBatchRecords(config);
         if (config.getStrictCursorSql() == null) {
@@ -131,6 +135,38 @@ public class InfluxDBAdapter implements TSDBAdapter {
         this.maxQueryRows = config.getMaxQueryRows();
         this.maxQueryResponseBytes = config.getMaxQueryResponseBytes();
         this.queryLogEnabled = queryLogEnabled;
+    }
+
+    /** Copies all settings without replacing explicitly supplied null values with defaults. */
+    private static InfluxDBProperties snapshotConfiguration(InfluxDBProperties source) {
+        if (source == null) {
+            return null;
+        }
+        InfluxDBProperties copy = new InfluxDBProperties();
+        copy.setEnable(source.isEnable());
+        copy.setFailFast(source.isFailFast());
+        copy.setUrl(source.getUrl());
+        copy.setToken(source.getToken());
+        copy.setDatabase(source.getDatabase());
+        copy.setStrictCursorSql(source.getStrictCursorSql());
+        copy.setMaxBatchRecords(source.getMaxBatchRecords());
+        copy.setMaxQueryRows(source.getMaxQueryRows());
+        copy.setMaxQueryResponseBytes(source.getMaxQueryResponseBytes());
+        InfluxDBProperties.HttpClientConfig http = source.getHttpClient();
+        if (http == null) {
+            copy.setHttpClient(null);
+        } else {
+            InfluxDBProperties.HttpClientConfig httpCopy = new InfluxDBProperties.HttpClientConfig();
+            httpCopy.setMaxIdleConnections(http.getMaxIdleConnections());
+            httpCopy.setKeepAliveDurationMs(http.getKeepAliveDurationMs());
+            httpCopy.setConnectTimeoutMs(http.getConnectTimeoutMs());
+            httpCopy.setReadTimeoutMs(http.getReadTimeoutMs());
+            httpCopy.setWriteTimeoutMs(http.getWriteTimeoutMs());
+            httpCopy.setCallTimeoutMs(http.getCallTimeoutMs());
+            httpCopy.setRetryOnConnectionFailure(http.isRetryOnConnectionFailure());
+            copy.setHttpClient(httpCopy);
+        }
+        return copy;
     }
 
     /**
@@ -471,6 +507,7 @@ public class InfluxDBAdapter implements TSDBAdapter {
      */
     @Override
     public QueryResult query(String database, TSDBQuery query) {
+        TSDBQueryValidator.validate(query);
         if (query == null || isBlank(query.getMeasurement())) {
             throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "measurement must not be empty");
         }
@@ -699,6 +736,7 @@ public class InfluxDBAdapter implements TSDBAdapter {
 
     /** Selects the configured strategy without rewriting ordinary queries or first cursor pages. */
     private static String buildQuerySql(TSDBQuery query, StrictCursorSqlStrategyEnum strategy) {
+        query = normalizeStrictCursorQuery(query);
         if (strategy == StrictCursorSqlStrategyEnum.UNION_ALL && query.isStrictCursor()) {
             if (query.hasAggregations()) {
                 throw new TSDBException(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION,
@@ -709,6 +747,30 @@ public class InfluxDBAdapter implements TSDBAdapter {
             }
         }
         return buildQuerySql(query);
+    }
+
+    /** Trims strict cursor keys in a private query copy, preserving distinct physical-name casing. */
+    private static TSDBQuery normalizeStrictCursorQuery(TSDBQuery query) {
+        if (!hasStrictCursorValues(query)) {
+            return query;
+        }
+        Map<String, Object> values = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : query.getCursorValues().entrySet()) {
+            String key = entry.getKey();
+            if (key == null || key.isBlank() || entry.getValue() == null) {
+                throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                        "Strict cursor keys must not be null or blank, and values must not be null");
+            }
+            String column = key.trim();
+            if (values.containsKey(column)) {
+                throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                        "Ambiguous strict cursor column after trimming: " + column);
+            }
+            values.put(column, entry.getValue());
+        }
+        TSDBQuery normalized = query.copy();
+        normalized.setCursorValues(values);
+        return normalized;
     }
 
     /**
@@ -835,6 +897,7 @@ public class InfluxDBAdapter implements TSDBAdapter {
         countQuery.setCursorValues(Collections.emptyMap());
         countQuery.setLimit(null);
         countQuery.setOffset(null);
+        TSDBQueryValidator.validate(countQuery);
 
         if (countQuery.hasAggregations()) {
             return "SELECT COUNT(*) AS total FROM ("

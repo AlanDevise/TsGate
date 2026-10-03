@@ -103,19 +103,44 @@ public class IoTDBTSDBAutoConfiguration {
 
     /**
      * Expose the official IoTDB table SessionPool for native operations through {@code @Autowired ITableSessionPool}.
+     * When fail-fast is disabled and initialization failed, the native pool is unavailable;
+     * applications should use optional injection and obtain a pool directly from the adapter after a manual retry.
+     * An unavailable native-pool bean is not automatically recreated after retrying initialization.
      * @param adapter IoTDB table-model adapter; for example {@code IoTDBTableAdapter}
-     * @return official IoTDB table-model pool
+     * @param properties startup failure policy
+     * @return borrowed official IoTDB table-model pool, or null after a tolerated initialization failure
      * @author Alan Zhang [initiator@alandevise.com]
      * @since 2026-07-07
      */
     @Bean(destroyMethod = "")
     @ConditionalOnMissingBean
+    public ITableSessionPool iotdbTableSessionPool(IoTDBTableAdapter adapter, IoTDBProperties properties) {
+        try {
+            return iotdbTableSessionPool(adapter);
+        } catch (TSDBException failure) {
+            if (properties.isFailFast() || failure.getErrorCode() != TSDBErrorCodeEnum.ADAPTER_STATE_ERROR) {
+                throw failure;
+            }
+            log.warn("IoTDB table SessionPool is unavailable after initialization failure");
+            return null;
+        }
+    }
+
+    /**
+     * Obtains the borrowed official pool with the original strict availability contract.
+     * Spring uses the overload accepting properties to apply its configured startup failure policy.
+     *
+     * @param adapter adapter that owns the native pool
+     * @return borrowed official IoTDB table-model pool
+     * @throws TSDBException if the native pool is unavailable
+     */
     public ITableSessionPool iotdbTableSessionPool(IoTDBTableAdapter adapter) {
-        if (adapter.getSessionPool() == null) {
+        ITableSessionPool sessionPool = adapter.getSessionPool();
+        if (sessionPool == null) {
             throw new TSDBException(TSDBErrorCodeEnum.ADAPTER_STATE_ERROR,
                     "IoTDB table SessionPool is not available");
         }
-        return adapter.getSessionPool();
+        return sessionPool;
     }
 
     /**

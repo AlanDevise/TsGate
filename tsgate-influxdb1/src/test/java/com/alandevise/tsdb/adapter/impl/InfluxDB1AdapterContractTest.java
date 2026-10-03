@@ -180,8 +180,8 @@ class InfluxDB1AdapterContractTest {
         resetLimits(2, 4096);
         replies.add(new Reply(200, response("[\"time\",\"a\",\"b\"]", "[[1,1,null],[2,null,2],[3,3,3]]")));
         TSDBQuery query = detail();
-        query.setLimit(1);
-        query.setOffset(1);
+        query.setLimit(0);
+        query.setOffset(-1);
         query.setCursorTime(999L);
         assertEquals(3, adapter.count(null, query));
         assertFalse(sql().contains("COUNT("));
@@ -218,9 +218,12 @@ class InfluxDB1AdapterContractTest {
 
     @Test
     void lineProtocolUsesV1EndpointPrecisionAndBasicCredentials() {
+        adapter.close();
         config.setUsername("user");
         config.setPassword("secret");
         config.setRetentionPolicy("autogen");
+        adapter = new InfluxDB1Adapter(config, http, false);
+        adapter.init();
         replies.add(new Reply(204, ""));
         assertTrue(adapter.write(null, point(123, 7)));
         Request request = requests.get(0);
@@ -228,6 +231,105 @@ class InfluxDB1AdapterContractTest {
         assertTrue(request.body().endsWith(" 123"));
         assertEquals("Basic " + Base64.getEncoder().encodeToString("user:secret".getBytes(StandardCharsets.ISO_8859_1)), request.authorization());
         assertFalse(config.toString().contains("secret"));
+    }
+
+    @Test
+    void constructionSnapshotPreservesCredentialsRetentionLimitsAndHttpSettings() {
+        adapter.close();
+        config.setUsername("user");
+        config.setPassword("secret");
+        config.setRetentionPolicy("autogen");
+        config.setMaxBatchRecords(1);
+        config.setMaxQueryRows(1);
+        config.setMaxQueryResponseBytes(1024);
+        http.setConnectTimeoutMs(1234);
+        http.setReadTimeoutMs(2345);
+        http.setWriteTimeoutMs(3456);
+        http.setCallTimeoutMs(4567);
+        adapter = new InfluxDB1Adapter(config, http, false);
+        config.setUrl("http://127.0.0.1:1");
+        config.setDatabase("changed_database");
+        config.setUsername("changed_user");
+        config.setPassword("changed_password");
+        config.setRetentionPolicy("changed_policy");
+        config.setMaxBatchRecords(100);
+        config.setMaxQueryRows(100);
+        config.setMaxQueryResponseBytes(1);
+        http.setReadTimeoutMs(-1);
+        adapter.init();
+        okhttp3.OkHttpClient actualHttp = (okhttp3.OkHttpClient) ReflectionTestUtils.getField(adapter, "client");
+        assertNotNull(actualHttp);
+        assertEquals(1234, actualHttp.connectTimeoutMillis());
+        assertEquals(2345, actualHttp.readTimeoutMillis());
+        assertEquals(3456, actualHttp.writeTimeoutMillis());
+        assertEquals(4567, actualHttp.callTimeoutMillis());
+        replies.add(new Reply(204, ""));
+        assertTrue(adapter.write(null, point(1, 1)));
+        replies.add(new Reply(204, ""));
+        adapter.getNativeClient().write("points value=2i 2");
+        String authorization = "Basic " + Base64.getEncoder().encodeToString("user:secret".getBytes(StandardCharsets.ISO_8859_1));
+        assertEquals(2, requests.size());
+        for (Request request : requests) {
+            assertTrue(request.path().contains("db=contract"));
+            assertTrue(request.path().contains("rp=autogen"));
+            assertEquals(authorization, request.authorization());
+        }
+        replies.add(new Reply(200, response("[\"time\",\"value\"]", "[[1,1]]")));
+        assertEquals(1, adapter.query(null, detail()).getRowCount());
+        replies.add(new Reply(200, response("[\"time\",\"value\"]", "[[1,1],[2,2]]")));
+        assertEquals(TSDBErrorCodeEnum.QUERY_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.query(null, detail())).getErrorCode());
+        assertEquals(1, adapter.getMaxBatchRecords());
+        assertEquals(BatchCommitStateEnum.NOT_COMMITTED, assertThrows(TSDBBatchWriteException.class,
+                () -> adapter.batchWriteDetailed(null, List.of(point(3, 3), point(4, 4)))).getResult().commitState());
+    }
+
+    @Test
+    void failedNativeInitializationRetriesTheConstructionSnapshot() {
+        adapter.close();
+        adapter = new InfluxDB1Adapter(config, http, false);
+        try (var factory = org.mockito.Mockito.mockStatic(org.influxdb.InfluxDBFactory.class)) {
+            factory.when(() -> org.influxdb.InfluxDBFactory.connect(
+                    org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(okhttp3.OkHttpClient.Builder.class)))
+                    .thenThrow(new IllegalStateException("synthetic resource failure"));
+            assertEquals(TSDBErrorCodeEnum.CONFIGURATION_ERROR,
+                    assertThrows(TSDBException.class, adapter::init).getErrorCode());
+        }
+        config.setUrl("http://127.0.0.1:1");
+        config.setDatabase("changed_after_failure");
+        http.setReadTimeoutMs(-1);
+        adapter.init();
+        assertTrue(adapter.executeQuery("SHOW MEASUREMENTS").isSuccess());
+        assertTrue(requests.get(0).body().contains("db=contract"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"null", "zero-limit", "negative-limit", "negative-offset", "reversed-time"})
+    void rejectsInvalidDirectQueryBeforeHttp(String invalid) {
+        TSDBQuery query = detail();
+        switch (invalid) {
+            case "null" -> query = null;
+            case "zero-limit" -> query.setLimit(0);
+            case "negative-limit" -> query.setLimit(-1);
+            case "negative-offset" -> query.setOffset(-1);
+            case "reversed-time" -> { query.setStartTime(2L); query.setEndTime(1L); }
+        }
+        TSDBQuery argument = query;
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.query(null, argument)).getErrorCode());
+        assertTrue(requests.isEmpty());
+    }
+
+    @Test
+    void countRejectsReversedBoundsAfterIgnoringPaging() {
+        TSDBQuery query = detail();
+        query.setLimit(0);
+        query.setOffset(-1);
+        query.setStartTime(2L);
+        query.setEndTime(1L);
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.count(null, query)).getErrorCode());
+        assertTrue(requests.isEmpty());
     }
 
     @Test

@@ -61,8 +61,8 @@ class InfluxDBAdapterContractTest {
         properties = new InfluxDBProperties();
         properties.setUrl("http://127.0.0.1:" + server.getAddress().getPort());
         properties.setDatabase("contract");
-        adapter = new InfluxDBAdapter(properties, false);
         properties.getHttpClient().setRetryOnConnectionFailure(false);
+        adapter = new InfluxDBAdapter(properties, false);
         adapter.init();
     }
 
@@ -102,7 +102,8 @@ class InfluxDBAdapterContractTest {
     void countIgnoresPagingAndCursorWhileRetainingFilters() throws Exception {
         TSDBQuery query = detail();
         query.setCursorTime(999L);
-        query.setOffset(20);
+        query.setLimit(0);
+        query.setOffset(-1);
         query.getFilters().add(new QueryFilter("device", OperatorEnum.EQ, List.of("a")));
         replies.add(new Reply(200, "[{\"total\":42}]"));
         assertEquals(42, adapter.count(null, query));
@@ -140,8 +141,11 @@ class InfluxDBAdapterContractTest {
 
     @Test
     void lineProtocolEscapesValuesAndUsesMillisecondsAndAtomicRequestValidation() {
-        replies.add(new Reply(204, ""));
+        adapter.close();
         properties.setToken("local-test-token");
+        adapter = new InfluxDBAdapter(properties, false);
+        adapter.init();
+        replies.add(new Reply(204, ""));
         TSDBRecord point = new TSDBRecord("room temp", 1000L, Map.of("device", "A,B"),
                 Map.of("note", "say \"yes\"", "count", 7));
         BatchWriteResult result = adapter.batchWriteDetailed(null, List.of(point));
@@ -247,9 +251,106 @@ class InfluxDBAdapterContractTest {
         assertNull(ReflectionTestUtils.getField(adapter, "client"));
         assertNull(ReflectionTestUtils.getField(adapter, "nativeClient"));
         assertThrows(TSDBException.class, () -> adapter.executeQuery("SELECT 1"));
+        properties.setUrl("http://127.0.0.1:1");
+        properties.setDatabase("changed_after_failure");
+        properties.getHttpClient().setReadTimeoutMs(-1);
         adapter.init();
         assertNotNull(adapter.getNativeClient());
         assertTrue(adapter.executeQuery("SELECT 1").isSuccess());
+        assertTrue(requests.get(0).body().contains("\"db\":\"contract\""));
+    }
+
+    @Test
+    void constructionSnapshotKeepsAdapterAndNativeWritesOnTheSameConnection() {
+        adapter.close();
+        properties.setToken("original-token");
+        properties.setMaxBatchRecords(1);
+        properties.setMaxQueryRows(1);
+        properties.setMaxQueryResponseBytes(1024);
+        InfluxDBProperties.HttpClientConfig originalHttp = properties.getHttpClient();
+        originalHttp.setConnectTimeoutMs(1234);
+        originalHttp.setReadTimeoutMs(2345);
+        originalHttp.setWriteTimeoutMs(3456);
+        originalHttp.setCallTimeoutMs(4567);
+        adapter = new InfluxDBAdapter(properties, false);
+        properties.setUrl("http://127.0.0.1:1");
+        properties.setToken("changed-token");
+        properties.setDatabase("changed_database");
+        properties.setMaxBatchRecords(100);
+        properties.setMaxQueryRows(100);
+        properties.setMaxQueryResponseBytes(1);
+        originalHttp.setConnectTimeoutMs(-1);
+        originalHttp.setReadTimeoutMs(-1);
+        originalHttp.setWriteTimeoutMs(-1);
+        originalHttp.setCallTimeoutMs(-1);
+        properties.setHttpClient(null);
+        adapter.init();
+        OkHttpClient http = (OkHttpClient) ReflectionTestUtils.getField(adapter, "client");
+        assertNotNull(http);
+        assertEquals(1234, http.connectTimeoutMillis());
+        assertEquals(2345, http.readTimeoutMillis());
+        assertEquals(3456, http.writeTimeoutMillis());
+        assertEquals(4567, http.callTimeoutMillis());
+        replies.add(new Reply(204, ""));
+        assertTrue(adapter.write(null, point(1)));
+        replies.add(new Reply(204, ""));
+        adapter.getNativeClient().writeRecord("points value=2i 2");
+        assertEquals(2, requests.size());
+        assertTrue(requests.get(0).path().contains("db=contract"));
+        assertEquals("Bearer original-token", requests.get(0).authorization());
+        assertTrue(requests.get(1).path().contains("bucket=contract"));
+        assertEquals("Token original-token", requests.get(1).authorization());
+        replies.add(new Reply(200, "[{\"value\":1}]"));
+        assertEquals(1, adapter.query(null, detail()).getRowCount());
+        replies.add(new Reply(200, "[{\"value\":1},{\"value\":2}]"));
+        assertEquals(TSDBErrorCodeEnum.QUERY_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.query(null, detail())).getErrorCode());
+        assertEquals(1, adapter.getMaxBatchRecords());
+        assertEquals(BatchCommitStateEnum.NOT_COMMITTED, assertThrows(TSDBBatchWriteException.class,
+                () -> adapter.batchWriteDetailed(null, List.of(point(3), point(4)))).getResult().commitState());
+    }
+
+    @Test
+    void nullHttpSettingsAreNotReplacedByDefaultsOrLaterPropertyChanges() {
+        adapter.close();
+        properties.setHttpClient(null);
+        adapter = new InfluxDBAdapter(properties, false);
+        properties.setHttpClient(new InfluxDBProperties.HttpClientConfig());
+        assertEquals(TSDBErrorCodeEnum.CONFIGURATION_ERROR,
+                assertThrows(TSDBException.class, adapter::init).getErrorCode());
+        assertEquals(TSDBErrorCodeEnum.CONFIGURATION_ERROR,
+                assertThrows(TSDBException.class, adapter::init).getErrorCode());
+        assertThrows(TSDBException.class, () -> new InfluxDBAdapter(null));
+        assertTrue(requests.isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"null", "zero-limit", "negative-limit", "negative-offset", "reversed-time"})
+    void rejectsInvalidDirectQueryBeforeHttp(String invalid) {
+        TSDBQuery query = detail();
+        switch (invalid) {
+            case "null" -> query = null;
+            case "zero-limit" -> query.setLimit(0);
+            case "negative-limit" -> query.setLimit(-1);
+            case "negative-offset" -> query.setOffset(-1);
+            case "reversed-time" -> { query.setStartTime(2L); query.setEndTime(1L); }
+        }
+        TSDBQuery argument = query;
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.query(null, argument)).getErrorCode());
+        assertTrue(requests.isEmpty());
+    }
+
+    @Test
+    void countRejectsReversedBoundsAfterIgnoringPaging() {
+        TSDBQuery query = detail();
+        query.setLimit(0);
+        query.setOffset(-1);
+        query.setStartTime(2L);
+        query.setEndTime(1L);
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.count(null, query)).getErrorCode());
+        assertTrue(requests.isEmpty());
     }
 
     @Test

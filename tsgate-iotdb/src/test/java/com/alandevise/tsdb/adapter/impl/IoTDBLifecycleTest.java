@@ -120,7 +120,7 @@ class IoTDBLifecycleTest {
     }
 
     @Test
-    void validationFailureCanBeCorrectedAndRetried() {
+    void correctingInvalidConfigurationRequiresANewAdapter() {
         IoTDBProperties config = config();
         config.setDatabase("");
         IoTDBTableAdapter adapter = new IoTDBTableAdapter(config, config.getPool(), false);
@@ -128,8 +128,15 @@ class IoTDBLifecycleTest {
             assertEquals(TSDBErrorCodeEnum.CONFIGURATION_ERROR,
                     assertThrows(TSDBException.class, adapter::init).getErrorCode());
             config.setDatabase("tsdb");
-            adapter.init();
-            assertNotNull(adapter.getSessionPool());
+            assertEquals(TSDBErrorCodeEnum.CONFIGURATION_ERROR,
+                    assertThrows(TSDBException.class, adapter::init).getErrorCode());
+            IoTDBTableAdapter corrected = new IoTDBTableAdapter(config, config.getPool(), false);
+            try {
+                corrected.init();
+                assertNotNull(corrected.getSessionPool());
+            } finally {
+                corrected.close();
+            }
         } finally {
             adapter.close();
         }

@@ -51,6 +51,39 @@ class IoTDBDockerIT extends DatabaseContractIT {
         assertThrows(TSDBException.class,()->adapter.executeQuery("SELECT unknown_field FROM telemetry"));
         assertEquals(1,rows(query()).size());
     }
+
+    @Test void propertyChangesCannotRedirectTheSessionPoolOrItsDefaultDatabase() throws Exception {
+        adapter.close();
+        IoTDBProperties properties = config(db);
+        List<String> endpoints = new ArrayList<>(properties.getPool().getNodeUrls());
+        properties.getPool().setNodeUrls(endpoints);
+        IoTDBTableAdapter snapshot = new IoTDBTableAdapter(properties, properties.getPool(), false);
+        adapter = snapshot;
+        properties.setDatabase("missing_changed_database");
+        properties.setUsername("unused_changed_user");
+        properties.setPassword("unused_changed_password");
+        properties.getTable().setTabletMaxRowSize(0);
+        properties.getPool().setMaxSize(0);
+        endpoints.clear();
+        endpoints.add("127.0.0.1:1");
+        snapshot.init();
+        properties.setDatabase("another_missing_database");
+        properties.setPool(null);
+        properties.setTable(null);
+        assertTrue(snapshot.write(null, record(BASE, "snapshot", 1)));
+        assertEquals(1, rows(query()).size());
+        try (ITableSession session = snapshot.getSessionPool().getSession();
+             var result = session.executeQueryStatement("SELECT value FROM telemetry")) {
+            assertTrue(result.hasNext());
+            assertEquals(1d, result.next().getFields().get(0).getDoubleV());
+            assertFalse(result.hasNext());
+        }
+        TSDBQuery invalid = query();
+        invalid.setLimit(0);
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> snapshot.query(null, invalid)).getErrorCode());
+        assertEquals(1, rows(query()).size());
+    }
     @Test void dateBlobAndNullRoundTrip() throws Exception {
         admin.executeNonQueryStatement("CREATE TABLE binary_data (device STRING TAG, payload BLOB FIELD, event_date DATE FIELD, optional STRING FIELD)");
         byte[] payload=new byte[]{0,1,-1,64};

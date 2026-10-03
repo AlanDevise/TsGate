@@ -103,6 +103,8 @@ Maven artifacts use the GitHub-identity groupId `io.github.alandevise` and Java 
 
 The optional `tsgate-bom` consolidates the verified client dependency versions into one explicit Maven import. It manages versions without adding unused clients to the application. InfluxDB 3 Arrow JVM options still belong to the application launcher; see the bilingual getting-started guides.
 
+Current source fixes capture adapter settings at construction, requiring a new instance for configuration changes, and explicitly reject invalid structured queries and strict cursors. These fixes are not yet a new Maven release. Startup failure policy, optional native-client access and source change history are documented in the bilingual Wiki.
+
 ## Documentation
 
 TsGate's English and Chinese guides are available on the [GitHub Wiki](https://github.com/AlanDevise/TsGate/wiki). They cover getting started, connection configuration, annotated data models, fluent queries, pagination, backend compatibility, testing and upgrades.

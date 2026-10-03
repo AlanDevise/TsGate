@@ -2,6 +2,7 @@ package com.alandevise.tsdb.adapter.impl;
 
 import com.alandevise.tsdb.util.TimeWindowDuration;
 import com.alandevise.tsdb.util.TimeWindowPlan;
+import com.alandevise.tsdb.util.TSDBQueryValidator;
 
 import com.alandevise.tsdb.adapter.TSDBAdapter;
 import com.alandevise.tsdb.config.IoTDBNodeDiscoveryModeEnum;
@@ -74,8 +75,8 @@ public class IoTDBTableAdapter implements TSDBAdapter {
 
     private enum LifecycleState { NEW, READY, CLOSED }
     /**
-     * The default database actually bound to the pool. Its value remains the stable borrow/return baseline after initialization,
-     * even if the configuration object is accidentally modified at runtime.
+     * The default database actually bound to the pool. Its value remains the stable borrow/return baseline
+     * after initialization and physical pool recovery.
      */
     private String poolDatabase;
     /**
@@ -104,6 +105,7 @@ public class IoTDBTableAdapter implements TSDBAdapter {
     /**
      * Create an IoTDB table-model adapter with configurable SQL query logging.
      * Automatic node discovery depends on the number of endpoints in {@code nodeUrls}.
+     * Connection, table, pool and endpoint settings are copied at construction and remain unchanged during recovery.
      * @param config IoTDB connection settings; for example {@code database=tsdb}
      * @param pool IoTDB connection pool settings; for example {@code nodeUrls=[127.0.0.1:16669]}
      * @param queryLogEnabled whether to log the executed SQL at DEBUG level
@@ -113,12 +115,59 @@ public class IoTDBTableAdapter implements TSDBAdapter {
     public IoTDBTableAdapter(IoTDBProperties config,
                              IoTDBProperties.IoTDBPoolConfig pool,
                              boolean queryLogEnabled) {
+        config = snapshotConfiguration(config);
+        pool = snapshotPoolConfiguration(pool);
         this.config = config;
         this.pool = pool;
         this.tabletMaxRowSize = resolveTabletMaxRowSize(config);
         this.maxBatchRecords = resolveMaxBatchRecords(config);
         this.maxQueryRows = resolveMaxQueryRows(config);
         this.queryLogEnabled = queryLogEnabled;
+    }
+
+    /** Copies adapter settings, including nested settings, without changing null validation behavior. */
+    private static IoTDBProperties snapshotConfiguration(IoTDBProperties source) {
+        if (source == null) {
+            return null;
+        }
+        IoTDBProperties copy = new IoTDBProperties();
+        copy.setEnable(source.isEnable());
+        copy.setFailFast(source.isFailFast());
+        copy.setDiscoveryMode(source.getDiscoveryMode());
+        copy.setUsername(source.getUsername());
+        copy.setPassword(source.getPassword());
+        copy.setDatabase(source.getDatabase());
+        copy.setMaxBatchRecords(source.getMaxBatchRecords());
+        copy.setMaxQueryRows(source.getMaxQueryRows());
+        IoTDBProperties.IoTDBConnectionConfig table = source.getTable();
+        if (table == null) {
+            copy.setTable(null);
+        } else {
+            IoTDBProperties.IoTDBConnectionConfig tableCopy = new IoTDBProperties.IoTDBConnectionConfig();
+            tableCopy.setTabletMaxRowSize(table.getTabletMaxRowSize());
+            tableCopy.setRpcCompressionEnabled(table.isRpcCompressionEnabled());
+            copy.setTable(tableCopy);
+        }
+        copy.setPool(snapshotPoolConfiguration(source.getPool()));
+        return copy;
+    }
+
+    /** The pool parameter may differ from properties.getPool(); preserve its independent settings. */
+    private static IoTDBProperties.IoTDBPoolConfig snapshotPoolConfiguration(IoTDBProperties.IoTDBPoolConfig source) {
+        if (source == null) {
+            return null;
+        }
+        IoTDBProperties.IoTDBPoolConfig copy = new IoTDBProperties.IoTDBPoolConfig();
+        copy.setEnabled(source.isEnabled());
+        copy.setNodeUrls(source.getNodeUrls() == null ? null : new ArrayList<>(source.getNodeUrls()));
+        copy.setMaxSize(source.getMaxSize());
+        copy.setWaitToGetSessionTimeoutInMs(source.getWaitToGetSessionTimeoutInMs());
+        copy.setConnectionTimeoutInMs(source.getConnectionTimeoutInMs());
+        copy.setQueryTimeoutInMs(source.getQueryTimeoutInMs());
+        copy.setMaxRetryCount(source.getMaxRetryCount());
+        copy.setRetryIntervalInMs(source.getRetryIntervalInMs());
+        copy.setFetchSize(source.getFetchSize());
+        return copy;
     }
 
     /**
@@ -384,6 +433,7 @@ public class IoTDBTableAdapter implements TSDBAdapter {
     @Override
     public QueryResult query(String database,
                              TSDBQuery query) {
+        TSDBQueryValidator.validate(query);
         return withReady(() -> {
             if (query == null || isBlank(query.getMeasurement())) {
                 throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "measurement must not be empty");
@@ -1147,6 +1197,7 @@ public class IoTDBTableAdapter implements TSDBAdapter {
         countQuery.setCursorValues(Collections.emptyMap());
         countQuery.setLimit(null);
         countQuery.setOffset(null);
+        TSDBQueryValidator.validate(countQuery);
 
         if (countQuery.hasAggregations()) {
             return "SELECT COUNT(*) AS total FROM ("

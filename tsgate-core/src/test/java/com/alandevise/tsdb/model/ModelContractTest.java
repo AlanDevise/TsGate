@@ -77,12 +77,22 @@ class ModelContractTest {
         assertThat(original.getOrder()).isEqualTo(SortOrderEnum.ASC);
     }
 
-    @Test void querySettersHandleNullCollectionsAndNormalizeCursorKeys() {
+    @Test void queryCursorCopiesRetainRawEntriesForStrictValidation() {
         TSDBQuery query = new TSDBQuery();
         Map<String, Object> cursor = new LinkedHashMap<>();
-        cursor.put(" time ", 1L); cursor.put("device", "a"); cursor.put(null, 5); cursor.put(" ", 5); cursor.put("missing", null);
+        cursor.put("time", 1L); cursor.put(" time ", 2L); cursor.put("TIME", 3L);
+        cursor.put("device", "a"); cursor.put(null, 5); cursor.put(" ", 5); cursor.put("missing", null);
+        Map<String, Object> expected = new LinkedHashMap<>(cursor);
         query.setCursorValues(cursor); cursor.clear();
-        assertThat(query.getCursorValues()).containsExactlyInAnyOrderEntriesOf(Map.of("time", 1L, "device", "a"));
+        assertThat(query.getCursorValues()).containsExactlyEntriesOf(expected);
+        TSDBQuery copy = query.copy();
+        assertThat(copy.getCursorValues()).containsExactlyEntriesOf(expected).isNotSameAs(query.getCursorValues());
+        copy.getCursorValues().clear();
+        assertThat(query.getCursorValues()).containsExactlyEntriesOf(expected);
+    }
+
+    @Test void querySettersHandleNullCollections() {
+        TSDBQuery query = new TSDBQuery();
         query.setCursorValues(null); query.setCursorColumns(null); query.setSelectColumns(null); query.setFilters(null);
         query.setGroupByTags(null); query.setAggregations(null); query.setSortSpecs(null); query.setTimeColumn(" "); query.setOrder(null);
         assertThat(query.getCursorValues()).isEmpty(); assertThat(query.getCursorColumns()).isEmpty();

@@ -70,6 +70,50 @@ class IoTDBAdapterContractTest {
         verifyNoInteractions(physicalPool);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"null", "zero-limit", "negative-limit", "negative-offset", "reversed-time"})
+    void rejectsInvalidDirectQueryBeforeBorrowing(String invalid) {
+        TSDBQuery query = detail();
+        switch (invalid) {
+            case "null" -> query = null;
+            case "zero-limit" -> query.setLimit(0);
+            case "negative-limit" -> query.setLimit(-1);
+            case "negative-offset" -> query.setOffset(-1);
+            case "reversed-time" -> { query.setStartTime(2L); query.setEndTime(1L); }
+        }
+        TSDBQuery argument = query;
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.query(null, argument)).getErrorCode());
+        verifyNoInteractions(physicalPool, session, dataSet);
+    }
+
+    @Test
+    void countStillClearsInvalidPagingAndCursorArguments() throws Exception {
+        TSDBQuery query = detail();
+        query.setLimit(0);
+        query.setOffset(-1);
+        query.setCursorTime(999L);
+        assertEquals(0, adapter.count(null, query));
+        assertTrue(sql().contains("COUNT(*)"));
+        assertFalse(sql().contains("LIMIT"));
+        assertFalse(sql().contains("OFFSET"));
+        assertFalse(sql().contains("999"));
+        assertEquals(0, query.getLimit());
+        assertEquals(-1, query.getOffset());
+    }
+
+    @Test
+    void countRejectsReversedBoundsAfterIgnoringPaging() {
+        TSDBQuery query = detail();
+        query.setLimit(0);
+        query.setOffset(-1);
+        query.setStartTime(2L);
+        query.setEndTime(1L);
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.count(null, query)).getErrorCode());
+        verifyNoInteractions(physicalPool, session, dataSet);
+    }
+
     @Test
     void quotesStringFilterAndBorrowsIndependentDatabaseContext() throws Exception {
         TSDBQuery query = detail();

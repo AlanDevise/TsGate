@@ -16,6 +16,8 @@ Use the workflow matching the request:
 
 This guide describes TsGate 2.0.0. Check the application's resolved dependencies or the repository's current POM before generating version-specific code. Read only the Wiki topics needed for the task. If a different version is in use, inspect its source/Javadoc instead of assuming identical APIs.
 
+The configuration-snapshot, strict-input validation and startup-failure-policy fixes described here are current source updates after the published 2.0.0 artifact; they have not been published as a new Maven release. Inspect the selected artifact before relying on those fixes.
+
 The repository publishes this file as a portable skill. To install it, put it in a `tsgate` skill directory recognized by the chosen coding assistant, or explicitly ask the assistant to read this file. A file at the repository root is not a guarantee of automatic discovery by every tool. A standalone copy uses the public Wiki links below; contribution commands require a TsGate source checkout.
 
 ## Application integration
@@ -58,6 +60,10 @@ tsdb:
 ```
 
 These environment-variable names are application choices, not additional TsGate properties. The username/password example assumes an authenticated server. Full connection, pool, and timeout options are in [Configuration](https://github.com/AlanDevise/TsGate/wiki/EN-Configuration).
+
+All adapters capture a defensive configuration snapshot at construction, including nested settings and IoTDB node URLs. Finish binding and edits before construction; create a new adapter/context for changed or corrected settings. Retrying a transient initialization failure and replacing an IoTDB physical pool reuse the captured settings.
+
+With `fail-fast=false`, tolerated client-resource initialization failure keeps the adapter/template while the native client is unavailable. Use optional injection or `ObjectProvider`; required native injection can still fail startup. After manual `init()` succeeds, get the borrowed client directly from the adapter. Spring does not automatically recreate an unavailable native-client bean. Required configuration remains mandatory.
 
 ### Use the actual public API
 
@@ -104,6 +110,8 @@ Writes are synchronous. For batches where commitment matters, use `batchWriteDet
 ### Respect query and backend limits
 
 - Structured `limit`/page size is `1..10000`. Native SQL has separate backend row limits, and InfluxDB responses also have byte limits. Do not use native SQL to bypass bounded-query behavior.
+- A null/empty strict cursor means the first page; preserve all nonempty entries until validation. Null/blank keys, null values, additional keys and normalized duplicates must fail with `ARGUMENT_ERROR`, never be silently removed.
+- Direct `TSDBAdapter.query` calls reject null queries, nonpositive limits, negative offsets and reversed time ranges before I/O. Count ignores pagination/cursors; backend limits and probe allowances still apply.
 - Time-only cursors can skip rows sharing a boundary timestamp. Use strict composite cursors when supported and needed; pass the returned cursor unchanged, preserving column identity and sorting. InfluxDB 1.x rejects strict composite cursors. See [Pagination](https://github.com/AlanDevise/TsGate/wiki/EN-Pagination-and-Native-Queries).
 - InfluxDB 3 Core 3.0.0/3.0.3 require `tsdb.influxdb.strict-cursor-sql: union-all` for the verified strict-cursor continuation queries. The default is `or`. UNION mode does not rewrite native SQL and rejects aggregate strict-cursor queries.
 - IoTDB 2.0.2 requires `tsdb.iotdb.table.rpc-compression-enabled: false`. The default is `true`. This controls Tablet RPC encoding, not transport or disk compression. IoTDB table-model integration requires its session pool.
@@ -139,6 +147,7 @@ Keep dialect-specific behavior in its adapter and database-client dependencies o
 - Reproduce a behavioral defect with a focused regression. Exercise shared-core changes across affected adapters and starter changes across backend activation combinations.
 - Validate writes before network I/O where supported; preserve confirmed batch counts and distinguish rejection, partial commitment, and unknown commitment. Retryability and commit certainty are separate facts.
 - Classify write failures by backend: InfluxDB 1.x HTTP 400 may partially persist and remains `UNKNOWN`; InfluxDB 3's definite-rejection rules depend on `accept_partial=false`. See [Writes and errors](https://github.com/AlanDevise/TsGate/wiki/EN-Writes-and-Errors). Distinguish application/adapter batch replay from the HTTP client's `retry-on-connection-failure` transport setting.
+- Snapshot complete adapter configuration at construction, including nested settings and endpoint lists. Do not read caller-owned mutable Properties during operations or recovery; configuration changes require a new instance.
 - Preserve idempotent initialization, retryable failed initialization, and terminal close. Close must coordinate with adapter operations; repeated IoTDB initialization must preserve the exposed native pool proxy. Native-client callers coordinate their own concurrent shutdown.
 - Preserve exact backend column identity, complete cursor ordering, and pagination lookahead. Test equal timestamps, mixed sorts, case-distinct columns, missing cursor fields, and invalid time values when changing cursors.
 - Preserve exact numeric range checks, invalid-value errors, bounded result consumption, and real timezone transitions. Test boundary inputs relevant to the change rather than only happy paths.

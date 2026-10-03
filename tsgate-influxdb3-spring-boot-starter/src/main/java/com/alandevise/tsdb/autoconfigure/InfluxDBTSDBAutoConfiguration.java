@@ -109,14 +109,38 @@ public class InfluxDBTSDBAutoConfiguration {
 
     /**
      * Exposes the official InfluxDB Java client for direct native access through {@code @Autowired InfluxDBClient}.
+     * When fail-fast is disabled and initialization failed, the native client is unavailable;
+     * applications should use optional injection and obtain a client directly from the adapter after a manual retry.
+     * An unavailable native-client bean is not automatically recreated after retrying initialization.
      *
      * @param adapter InfluxDB adapter, for example the auto-configured {@code InfluxDBAdapter}
-     * @return official InfluxDB Java client
+     * @param properties startup failure policy
+     * @return borrowed official InfluxDB Java client, or null after a tolerated initialization failure
      * @author Alan Zhang [initiator@alandevise.com]
      * @since 2026-07-07
      */
     @Bean(destroyMethod = "")
     @ConditionalOnMissingBean
+    public InfluxDBClient influxDBClient(InfluxDBAdapter adapter, InfluxDBProperties properties) {
+        try {
+            return influxDBClient(adapter);
+        } catch (TSDBException failure) {
+            if (properties.isFailFast() || failure.getErrorCode() != TSDBErrorCodeEnum.ADAPTER_STATE_ERROR) {
+                throw failure;
+            }
+            log.warn("InfluxDB native client is unavailable after initialization failure");
+            return null;
+        }
+    }
+
+    /**
+     * Obtains the borrowed official client with the original strict availability contract.
+     * Spring uses the overload accepting properties to apply its configured startup failure policy.
+     *
+     * @param adapter adapter that owns the native client
+     * @return borrowed official InfluxDB Java client
+     * @throws TSDBException if the native client is unavailable
+     */
     public InfluxDBClient influxDBClient(InfluxDBAdapter adapter) {
         InfluxDBClient nativeClient = adapter.getNativeClient();
         if (nativeClient == null) {

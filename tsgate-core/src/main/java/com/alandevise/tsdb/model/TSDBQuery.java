@@ -157,6 +157,8 @@ public class TSDBQuery {
 
     /**
      * Sets the composite-cursor values returned by the previous page.
+     * <p>Copies keys and values without sanitizing them so strict-pagination validation can reject malformed
+     * entries and backend-normalized key collisions. Null or empty maps still represent the first page.</p>
      *
      * @param cursorValues composite-cursor values, for example {@code Map.of("time", 1783000000000L, "device_code", "D001")}
      * @author Alan Zhang [initiator@alandevise.com]
@@ -278,25 +280,15 @@ public class TSDBQuery {
     }
 
     /**
-     * Copies composite-cursor values, dropping blank column names and preserving caller-provided column order.
+     * Copies composite-cursor entries unchanged, preserving column order and invalid input for later validation.
      *
      * @param values original cursor values, for example {@code Map.of("time", 1783000000000L)}
-     * @return sanitized cursor values
+     * @return independent cursor values, or an empty map for a null input
      * @author Alan Zhang [initiator@alandevise.com]
      * @since 2026-07-07
      */
     private static Map<String, Object> copyCursorValues(Map<String, Object> values) {
-        Map<String, Object> copied = new LinkedHashMap<>();
-        if (values == null) {
-            return copied;
-        }
-        for (Map.Entry<String, Object> entry : values.entrySet()) {
-            String key = entry.getKey();
-            if (key != null && !key.trim().isEmpty() && entry.getValue() != null) {
-                copied.put(key.trim(), entry.getValue());
-            }
-        }
-        return copied;
+        return values == null ? new LinkedHashMap<>() : new LinkedHashMap<>(values);
     }
 
     /**

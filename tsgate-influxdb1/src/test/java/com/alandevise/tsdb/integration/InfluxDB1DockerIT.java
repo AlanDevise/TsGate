@@ -97,6 +97,37 @@ class InfluxDB1DockerIT {
     }
 
     @Test
+    void propertyChangesCannotRedirectAdapterOrNativeWrites() {
+        adapter.close();
+        InfluxDB1Properties properties = new InfluxDB1Properties();
+        properties.setUrl(URL);
+        properties.setDatabase(database);
+        InfluxDB1HttpClientProperties http = new InfluxDB1HttpClientProperties();
+        http.setCallTimeoutMs(15000);
+        adapter = new InfluxDB1Adapter(properties, http, false);
+        properties.setUrl("http://127.0.0.1:1");
+        properties.setDatabase("missing_changed_database");
+        properties.setUsername("unused_changed_user");
+        properties.setPassword("unused_changed_password");
+        properties.setRetentionPolicy("missing_changed_policy");
+        http.setReadTimeoutMs(-1);
+        adapter.init();
+        properties.setDatabase("another_missing_database");
+        properties.setRetentionPolicy("another_missing_policy");
+        assertTrue(adapter.write(null, point(base, "adapter", 1d)));
+        adapter.getNativeClient().write("points,device=native value=2.0 " + ((base + 1) * 1_000_000L));
+        assertEquals(2, adapter.query(null, detail()).getRowCount());
+        org.influxdb.dto.QueryResult nativeRows = adapter.getNativeClient().query(new Query("SELECT value FROM points", database));
+        assertFalse(nativeRows.hasError(), nativeRows.getError());
+        assertEquals(2, nativeRows.getResults().get(0).getSeries().get(0).getValues().size());
+        TSDBQuery invalid = detail();
+        invalid.setLimit(0);
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.query(null, invalid)).getErrorCode());
+        assertEquals(2, adapter.query(null, detail()).getRowCount());
+    }
+
+    @Test
     void timeCursorAndOffsetPagesRespectRowCountSemantics() {
         seed();
         PageResult<Point> first = template.query(Point.class).orderByTimeAsc().limit(2).page();

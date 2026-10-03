@@ -8,6 +8,7 @@ import com.alandevise.tsdb.model.*;
 import com.alandevise.tsdb.metadata.DefaultTSDBMetadataResolver;
 import com.alandevise.tsdb.util.TimeWindowDuration;
 import com.alandevise.tsdb.util.TimeWindowPlan;
+import com.alandevise.tsdb.util.TSDBQueryValidator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.JsonToken;
@@ -77,6 +78,7 @@ public class InfluxDB1Adapter implements TSDBAdapter {
 
     /**
      * Validates settings without creating clients or contacting the server; call {@link #init()} before use.
+     * Connection and HTTP settings are copied at construction; later property changes do not reconfigure this instance.
      *
      * @param config connection settings and operation limits
      * @param httpConfig HTTP pool and timeout settings
@@ -84,6 +86,8 @@ public class InfluxDB1Adapter implements TSDBAdapter {
      * @throws TSDBException if the configuration is invalid
      */
     public InfluxDB1Adapter(InfluxDB1Properties config, InfluxDB1HttpClientProperties httpConfig, boolean queryLogEnabled) {
+        config = snapshotConfiguration(config);
+        httpConfig = snapshotHttpConfiguration(httpConfig);
         this.config = config;
         if (httpConfig == null || httpConfig.getMaxIdleConnections() < 0 || httpConfig.getKeepAliveDurationMs() <= 0
                 || httpConfig.getConnectTimeoutMs() < 0 || httpConfig.getReadTimeoutMs() < 0
@@ -104,6 +108,41 @@ public class InfluxDB1Adapter implements TSDBAdapter {
         this.maxQueryRows = config.getMaxQueryRows();
         this.maxQueryResponseBytes = config.getMaxQueryResponseBytes();
         this.queryLogEnabled = queryLogEnabled;
+    }
+
+    /** Copies connection settings while preserving nulls for the existing validation path. */
+    private static InfluxDB1Properties snapshotConfiguration(InfluxDB1Properties source) {
+        if (source == null) {
+            return null;
+        }
+        InfluxDB1Properties copy = new InfluxDB1Properties();
+        copy.setEnable(source.isEnable());
+        copy.setFailFast(source.isFailFast());
+        copy.setUrl(source.getUrl());
+        copy.setDatabase(source.getDatabase());
+        copy.setUsername(source.getUsername());
+        copy.setPassword(source.getPassword());
+        copy.setRetentionPolicy(source.getRetentionPolicy());
+        copy.setMaxBatchRecords(source.getMaxBatchRecords());
+        copy.setMaxQueryRows(source.getMaxQueryRows());
+        copy.setMaxQueryResponseBytes(source.getMaxQueryResponseBytes());
+        return copy;
+    }
+
+    /** Copies the separately supplied HTTP configuration before either client is created. */
+    private static InfluxDB1HttpClientProperties snapshotHttpConfiguration(InfluxDB1HttpClientProperties source) {
+        if (source == null) {
+            return null;
+        }
+        InfluxDB1HttpClientProperties copy = new InfluxDB1HttpClientProperties();
+        copy.setMaxIdleConnections(source.getMaxIdleConnections());
+        copy.setKeepAliveDurationMs(source.getKeepAliveDurationMs());
+        copy.setConnectTimeoutMs(source.getConnectTimeoutMs());
+        copy.setReadTimeoutMs(source.getReadTimeoutMs());
+        copy.setWriteTimeoutMs(source.getWriteTimeoutMs());
+        copy.setCallTimeoutMs(source.getCallTimeoutMs());
+        copy.setRetryOnConnectionFailure(source.isRetryOnConnectionFailure());
+        return copy;
     }
 
     /**
@@ -533,6 +572,7 @@ public class InfluxDB1Adapter implements TSDBAdapter {
     }
 
     private static void validateQuery(TSDBQuery query) {
+        TSDBQueryValidator.validate(query);
         if (query == null || isBlank(query.getMeasurement()))
             throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "measurement must not be empty");
         if (!"time".equalsIgnoreCase(query.getTimeColumn()))
@@ -542,10 +582,6 @@ public class InfluxDB1Adapter implements TSDBAdapter {
         for (SortSpec sort : query.getSortSpecs()) {
             if (!"time".equalsIgnoreCase(sort.column())) throw unsupported("InfluxQL only supports ORDER BY time");
         }
-        if (query.getLimit() != null && query.getLimit() <= 0 || query.getOffset() != null && query.getOffset() < 0)
-            throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "InfluxDB1 limit must be positive and offset nonnegative");
-        if (query.getStartTime() != null && query.getEndTime() != null && query.getStartTime() > query.getEndTime())
-            throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "InfluxDB1 timeRange start must not exceed its end");
         if (!query.hasAggregations() && (!isBlank(query.getGroupByTime()) || !query.getGroupByTags().isEmpty()))
             throw unsupported("InfluxQL grouping requires an aggregation");
         if (!query.hasAggregations() && !query.getSelectColumns().isEmpty()) {

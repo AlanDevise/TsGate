@@ -24,6 +24,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigDecimal;
@@ -32,9 +34,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -260,7 +264,7 @@ class InfluxDBStrictCursorStrategyTest {
     }
 
     @Test
-    void reversedTimeBoundsStillValidateCompleteCursorBeforeFalseQuery() throws Exception {
+    void reversedTimeBoundsAreRejectedBeforeCursorSqlGeneration() {
         open(StrictCursorSqlStrategyEnum.UNION_ALL);
         TSDBQuery query = cursor();
         query.setStartTime(2000L);
@@ -270,9 +274,9 @@ class InfluxDBStrictCursorStrategyTest {
                 assertThrows(TSDBException.class, () -> adapter.query(null, query)).getErrorCode());
         assertTrue(requests.isEmpty());
         query.getCursorValues().put("device", "b");
-        assertEquals(0, adapter.query(null, query).getRowCount());
-        assertTrue(sql(0).contains("AND FALSE"), sql(0));
-        assertFalse(sql(0).contains("UNION"), sql(0));
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.query(null, query)).getErrorCode());
+        assertTrue(requests.isEmpty());
     }
 
     @Test
@@ -336,6 +340,62 @@ class InfluxDBStrictCursorStrategyTest {
     }
 
     @ParameterizedTest
+    @MethodSource("cursorColumnModes")
+    void paddedCursorKeysMatchCanonicalSqlWithoutChangingTheCaller(StrictCursorSqlStrategyEnum strategy,
+                                                                 boolean explicitColumns) throws Exception {
+        open(strategy);
+        TSDBQuery query = cursor();
+        if (!explicitColumns) query.setCursorColumns(List.of());
+        TSDBQuery canonical = query.copy();
+        query.setCursorValues(Map.of(" time ", 1000L, " device ", "b"));
+        String before = mapper.writeValueAsString(query);
+        adapter.query(null, canonical);
+        adapter.query(null, query);
+        assertEquals(sql(0), sql(1));
+        assertEquals(before, mapper.writeValueAsString(query));
+        assertEquals(Map.of(" time ", 1000L, " device ", "b"), query.getCursorValues());
+        assertEquals(2, requests.size());
+    }
+
+    private static Stream<Arguments> cursorColumnModes() {
+        return Stream.of(StrictCursorSqlStrategyEnum.values())
+                .flatMap(strategy -> Stream.of(true, false).map(explicit -> Arguments.of(strategy, explicit)));
+    }
+
+    @ParameterizedTest
+    @MethodSource("malformedCursorCases")
+    void malformedRawCursorEntriesFailBeforeHttpWithoutChangingTheCaller(StrictCursorSqlStrategyEnum strategy,
+                                                                       String invalid) {
+        open(strategy);
+        TSDBQuery query = cursor();
+        Map<String, Object> values = new LinkedHashMap<>(query.getCursorValues());
+        switch (invalid) {
+            case "null-key" -> values.put(null, 1);
+            case "blank-key" -> values.put(" \t ", 1);
+            case "unicode-blank-key" -> values.put("\u2003", 1);
+            case "null-value" -> values.put("device", null);
+            case "trim-collision" -> values.put(" time ", 2000L);
+            default -> fail("Unknown malformed cursor case");
+        }
+        query.setCursorValues(values);
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.query(null, query)).getErrorCode());
+        assertEquals(values, query.getCursorValues());
+        assertEquals(new ArrayList<>(values.keySet()), new ArrayList<>(query.getCursorValues().keySet()));
+        assertTrue(requests.isEmpty());
+        query.setStrictCursor(false);
+        assertTrue(adapter.query(null, query).isSuccess());
+        assertEquals(values, query.getCursorValues());
+        assertEquals(1, requests.size());
+    }
+
+    private static Stream<Arguments> malformedCursorCases() {
+        return Stream.of(StrictCursorSqlStrategyEnum.values())
+                .flatMap(strategy -> Stream.of("null-key", "blank-key", "unicode-blank-key", "null-value", "trim-collision")
+                        .map(invalid -> Arguments.of(strategy, invalid)));
+    }
+
+    @ParameterizedTest
     @EnumSource(StrictCursorSqlStrategyEnum.class)
     void caseDistinctCursorKeysKeepTheirOwnDirectionsAndValues(StrictCursorSqlStrategyEnum strategy) throws Exception {
         open(strategy);
@@ -344,7 +404,8 @@ class InfluxDBStrictCursorStrategyTest {
         query.setSortSpecs(List.of(new SortSpec("value", SortOrderEnum.DESC), new SortSpec("VALUE", SortOrderEnum.ASC),
                 new SortSpec("TIME", SortOrderEnum.DESC), new SortSpec("time", SortOrderEnum.ASC),
                 new SortSpec("device", SortOrderEnum.ASC)));
-        query.setCursorValues(Map.of("value", 7, "VALUE", 99, "TIME", 42.5, "time", 1000L, "device", "b"));
+        query.setCursorValues(Map.of(" value ", 7, " VALUE ", 99, " TIME ", 42.5, " time ", 1000L, " device ", "b"));
+        String before = mapper.writeValueAsString(query);
         adapter.query(null, query);
         String sql = sql(0);
         assertTrue(sql.contains("\"value\" < 7"), sql);
@@ -352,6 +413,7 @@ class InfluxDBStrictCursorStrategyTest {
         assertTrue(sql.contains("\"TIME\" < 42.5"), sql);
         assertTrue(sql.contains("time > " + CURSOR_TIME), sql);
         assertTrue(sql.endsWith("ORDER BY \"value\" DESC, \"VALUE\" ASC, \"TIME\" DESC, time ASC, \"device\" ASC LIMIT 3"), sql);
+        assertEquals(before, mapper.writeValueAsString(query));
     }
 
     @ParameterizedTest

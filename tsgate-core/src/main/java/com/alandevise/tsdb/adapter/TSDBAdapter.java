@@ -100,6 +100,9 @@ public interface TSDBAdapter {
 
     /**
      * Executes a common query model.
+     * <p>Built-in adapters reject a null query, nonpositive explicit limit, negative offset, and reversed
+     * time bounds with {@code ARGUMENT_ERROR} before database I/O. A null limit leaves SQL unpaged;
+     * backend result limits still apply. Zero offsets and equal time bounds are valid.</p>
      *
      * @param database target database, for example {@code "tsdb"}; a blank value selects the adapter default
      * @param query    common query model, for example containing {@code measurement=ACCRUE, limit=100}

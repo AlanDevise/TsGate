@@ -103,6 +103,8 @@ Maven 制品采用 GitHub 身份对应的 groupId `io.github.alandevise`，Java 
 
 可选的 `tsgate-bom` 将已验证的客户端依赖版本收敛为一次显式 Maven 导入；它只管理版本，不会让业务引入未使用的客户端。InfluxDB 3 的 Arrow JVM 参数仍需配置到业务启动进程，详见中英文入门指南。
 
+当前源码修复使 adapter 在构造时捕获配置，修改配置需要新实例，并明确拒绝非法结构化查询与严格游标；这些修复尚未发布新的 Maven 版本。启动失败策略、原生客户端可选获取和源码变更记录详见中英文 Wiki。
+
 ## 项目文档
 
 TsGate 的中英文使用指南位于 [GitHub Wiki](https://github.com/AlanDevise/TsGate/wiki)，涵盖快速开始、连接配置、注解数据模型、链式查询、分页、后端兼容性、测试和升级说明。

@@ -38,6 +38,41 @@ class InfluxDBDockerIT extends DatabaseContractIT {
         assertTrue(adapter.write(null,record(BASE,"a",1)));
         try(var stream=((InfluxDBAdapter)adapter).getNativeClient().query("SELECT value FROM telemetry")) { assertEquals(1,stream.count()); }
     }
+
+    @Test void propertyChangesCannotRedirectAdapterOrNativeWrites() {
+        adapter.close();
+        InfluxDBProperties properties = new InfluxDBProperties();
+        properties.setUrl(URL);
+        properties.setDatabase(db);
+        properties.setStrictCursorSql(StrictCursorSqlStrategyEnum.valueOf(System.getProperty(
+                "tsdb.it.influxdb.strict-cursor-sql", "OR").replace('-', '_').toUpperCase(Locale.ROOT)));
+        InfluxDBAdapter snapshot = new InfluxDBAdapter(properties, false);
+        adapter = snapshot;
+        properties.setUrl("http://127.0.0.1:1");
+        properties.setDatabase("missing_changed_database");
+        properties.setToken("unused_changed_token");
+        properties.getHttpClient().setReadTimeoutMs(-1);
+        snapshot.init();
+        properties.setDatabase("another_missing_database");
+        properties.setHttpClient(null);
+        assertTrue(snapshot.write(null, record(BASE, "adapter", 1)));
+        snapshot.getNativeClient().writeRecord("telemetry,device=native value=2.0 " + (BASE + 1));
+        assertEquals(2, rows(query()).size());
+        try (var stream = snapshot.getNativeClient().query("SELECT value FROM telemetry")) {
+            assertEquals(2, stream.count());
+        }
+        TSDBQuery invalid = query();
+        invalid.setLimit(0);
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> snapshot.query(null, invalid)).getErrorCode());
+        assertEquals(2, rows(query()).size());
+        TSDBQuery strict = query();
+        strict.setStrictCursor(true);
+        strict.setCursorColumns(List.of("time", "device"));
+        strict.setCursorValues(Map.of(" time ", BASE, " device ", "adapter"));
+        assertEquals("native", snapshot.query(null, strict).getRows().get(0).get("device"));
+        assertEquals(Map.of(" time ", BASE, " device ", "adapter"), strict.getCursorValues());
+    }
     @Test void schemaConflictIsRejectedWithZeroConfirmedCommits() {
         assertTrue(adapter.write(null,record(BASE,"a",1)));
         TSDBRecord invalid=new TSDBRecord("telemetry",BASE+1,Map.of("device","a"),Map.of("value","wrong-type"));

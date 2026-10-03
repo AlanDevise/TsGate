@@ -9,11 +9,14 @@ import com.alandevise.tsdb.model.*;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.time.Instant;
 import java.util.*;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -409,6 +412,64 @@ class TGTemplateTest {
         verify(adapter, never()).query(any(), any());
     }
 
+    @ParameterizedTest @MethodSource("malformedStrictCursors")
+    void malformedStrictCursorEntriesFailBeforeDatabaseIo(String scenario, Map<String, Object> cursor) {
+        TSDBException failure = assertThrows(TSDBException.class,
+                () -> template.query(Point.class).cursor(cursor).strictCursorPage(Map.class), scenario);
+        assertThat(failure.getErrorCode()).isEqualTo(TSDBErrorCodeEnum.ARGUMENT_ERROR);
+        verify(adapter, never()).query(any(), any());
+        verify(adapter, never()).count(any(), any());
+        verify(adapter, never()).executeQuery(any());
+    }
+
+    static Stream<Arguments> malformedStrictCursors() {
+        return Stream.of(
+                Arguments.of("all-null cursor", cursorEntries("time", null, "device_code", null)),
+                Arguments.of("null time", cursorEntries("time", null, "device_code", "a")),
+                Arguments.of("null tag", cursorEntries("time", 1L, "device_code", null)),
+                Arguments.of("extra null value", cursorEntries("time", 1L, "device_code", "a", "unexpected", null)),
+                Arguments.of("null key", cursorEntries("time", 1L, "device_code", "a", null, 2L)),
+                Arguments.of("blank key", cursorEntries("time", 1L, "device_code", "a", " \t", 2L)),
+                Arguments.of("only null key", cursorEntries(null, 1L)),
+                Arguments.of("only blank key", cursorEntries(" \t", 1L)),
+                Arguments.of("trimmed time collision", cursorEntries("time", 1L, " time ", 2L, "device_code", "a")),
+                Arguments.of("trimmed tag collision", cursorEntries("time", 1L, "device_code", "a", " device_code ", "b")));
+    }
+
+    @ParameterizedTest @ValueSource(booleans = {false, true})
+    void nullAndEmptyStrictCursorsStillRequestTheFirstPage(boolean nullCursor) {
+        when(adapter.query(isNull(), any())).thenReturn(rows(row(1L, "a", 1.0)));
+        PageResult<Map> page = template.query(Point.class)
+                .cursor(nullCursor ? null : Collections.emptyMap()).strictCursorPage(Map.class);
+        assertThat(page.getRows()).hasSize(1);
+        assertThat(page.isHasNext()).isFalse();
+        assertThat(capturedQuery().getCursorValues()).isEmpty();
+    }
+
+    @Test void validWhitespaceCursorKeysNormalizeWithoutMutatingTheBuilderSnapshot() {
+        when(adapter.query(isNull(), any())).thenReturn(rows(row(2L, "b", 2.0)));
+        Map<String, Object> cursor = cursorEntries(" time ", 1L, " device_code ", "a");
+        TGQueryBuilder<Point> builder = template.query(Point.class).cursor(cursor);
+        cursor.clear();
+        builder.strictCursorPage(Map.class);
+        assertThat(capturedQuery().getCursorValues()).containsExactlyEntriesOf(cursorEntries("time", 1L, "device_code", "a"));
+        assertThat(builder.build().getCursorValues()).containsExactlyEntriesOf(
+                cursorEntries(" time ", 1L, " device_code ", "a"));
+    }
+
+    @Test void backendFoldedCursorCollisionRetainsNullEntryUntilValidation() {
+        when(adapter.normalizeColumnIdentifier(any())).thenAnswer(call -> {
+            String column = call.getArgument(0);
+            return column == null ? null : column.trim().toLowerCase(Locale.ROOT);
+        });
+        Map<String, Object> cursor = cursorEntries("time", 1L, "Time", null, "device_code", "a");
+        TSDBException failure = assertThrows(TSDBException.class,
+                () -> template.query(Point.class).cursor(cursor).strictCursorPage(Map.class));
+        assertThat(failure.getErrorCode()).isEqualTo(TSDBErrorCodeEnum.ARGUMENT_ERROR);
+        assertThat(failure).hasMessageContaining("ambiguous");
+        verify(adapter, never()).query(any(), any());
+    }
+
     @Test void strictCursorTreatsTimeVariantsAsOrdinaryPhysicalFields() {
         when(adapter.query(isNull(), any())).thenReturn(rows(
                 Map.of("time", 1L, "device_code", "a", "TIME", 99.5, "timestamp", "ordinary", "_time", 71),
@@ -477,6 +538,14 @@ class TGTemplateTest {
     }
 
     static class CustomMap extends LinkedHashMap<String, Object> {}
+
+    private static Map<String, Object> cursorEntries(Object... entries) {
+        Map<String, Object> cursor = new LinkedHashMap<>();
+        for (int i = 0; i < entries.length; i += 2) {
+            cursor.put((String) entries[i], entries[i + 1]);
+        }
+        return cursor;
+    }
 
     private TSDBQuery capturedQuery() {
         ArgumentCaptor<TSDBQuery> query = ArgumentCaptor.forClass(TSDBQuery.class);
