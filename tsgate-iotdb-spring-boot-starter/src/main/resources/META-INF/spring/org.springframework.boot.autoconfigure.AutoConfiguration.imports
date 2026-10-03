@@ -1,1 +1,1 @@
-com.alandevise.tsdb.autoconfigure.IoTDBTSDBAutoConfiguration
+com.alandevise.tsgate.autoconfigure.IoTDBTSDBAutoConfiguration

@@ -181,7 +181,7 @@ def verify(root, javadoc_java_home=None):
                             f"{path.name}: Javadoc artifact contains Java sources or classes")
                     require("index.html" in names, f"{path.name}: missing Javadoc index")
                     if artifact == "tsgate-core":
-                        document = "com/alandevise/tsdb/exception/TSDBException.html"
+                        document = "com/alandevise/tsgate/exception/TSDBException.html"
                         require(document in names, f"{path.name}: missing exception API docs")
                         if document in names:
                             require(b'id="getErrorCode()"' in archive.read(document),

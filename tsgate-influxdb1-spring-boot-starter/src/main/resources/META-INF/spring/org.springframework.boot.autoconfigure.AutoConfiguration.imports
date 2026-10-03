@@ -1,1 +1,1 @@
-com.alandevise.tsdb.autoconfigure.InfluxDB1TSDBAutoConfiguration
+com.alandevise.tsgate.autoconfigure.InfluxDB1TSDBAutoConfiguration
