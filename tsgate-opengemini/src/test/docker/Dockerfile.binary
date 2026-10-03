@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+ARG RUNTIME_IMAGE=debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+FROM ${RUNTIME_IMAGE}
+ARG VERSION
+ARG SOURCE_COMMIT
+ARG FIXTURE_SHA256
+LABEL com.alandevise.tsgate.opengemini.fixture.sha256="${FIXTURE_SHA256}" \
+      org.opencontainers.image.title="TsGate openGemini regression fixture" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      org.opencontainers.image.source="https://github.com/openGemini/openGemini"
+COPY release.tar.gz /tmp/release.tar.gz
+RUN mkdir -p /opt/opengemini && tar -xzf /tmp/release.tar.gz -C /opt/opengemini \
+    && rm /tmp/release.tar.gz
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENV PATH="/opt/opengemini/usr/bin:${PATH}" GOMAXPROCS=2
+EXPOSE 8086 8091
+ENTRYPOINT ["/entrypoint.sh"]

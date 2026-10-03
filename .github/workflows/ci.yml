@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       run_docker:
-        description: Run the representative three-database Docker regression suite
+        description: Run the representative IoTDB and InfluxDB Docker suite; openGemini uses a separate deployment matrix
         type: boolean
         default: false
 
@@ -55,9 +55,11 @@ jobs:
           cat "$RUNNER_TEMP/tsgate-java-properties"
           grep -Eq '^[[:space:]]*java.vendor = Eclipse Adoptium$' "$RUNNER_TEMP/tsgate-java-properties"
           grep -Eq '^[[:space:]]*java.specification.version = 17$' "$RUNNER_TEMP/tsgate-java-properties"
-      - name: Release artifact verifier regression tests
+      - name: Test runner and release artifact verifier regression tests
         if: matrix.release != ''
-        run: python3 -m unittest discover -s tsgate-core/src/test/scripts -p 'test_verify_release_artifacts.py'
+        run: |
+          python3 -m unittest discover -s tsgate-core/src/test/scripts -p 'test_*.py'
+          python3 -m unittest discover -s tsgate-opengemini/src/test/scripts -p 'test_*.py'
       - name: Unit tests and unsigned release artifacts with third-party license verification
         run: >-
           python3 tsgate-core/src/test/scripts/run-tests.py unit
@@ -73,7 +75,7 @@ jobs:
           if-no-files-found: warn
 
   docker:
-    name: Representative Docker integration tests
+    name: Representative IoTDB and InfluxDB Docker integration tests
     if: github.event_name == 'workflow_dispatch' && inputs.run_docker
     runs-on: ubuntu-24.04
     timeout-minutes: 35

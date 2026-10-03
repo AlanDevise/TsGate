@@ -133,13 +133,17 @@ public interface TSDBAdapter {
      * custom adapters that do not override this method execute an unpaged query without cursors and count its returned rows.</p>
      *
      * @param database target database, for example {@code "tsdb"}; a blank value selects the adapter default
-     * @param query    common query model; pagination and cursor parameters are ignored
+     * @param query    non-null common query model; pagination and cursor parameters are ignored
      * @return total rows before pagination
+     * @throws TSDBException with {@code ARGUMENT_ERROR} if the query is null
      * @author Alan Zhang [initiator@alandevise.com]
      * @since 2026-08-25
      */
     default long count(String database,
                        TSDBQuery query) {
+        if (query == null) {
+            throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "query must not be null");
+        }
         TSDBQuery countQuery = query.copy();
         countQuery.setPaginationProbe(false);
         countQuery.setCursorTime(null);

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import urllib.parse
 import uuid
 import xml.etree.ElementTree as ET
 
@@ -67,7 +68,8 @@ def source_manifest():
                                     "scripts/verify-release-artifacts.py")}
     paths.update(ROOT.glob("tsgate-*/pom.xml"))
     for module in ROOT.glob("tsgate-*"):
-        paths.update(path for path in (module / "src").rglob("*") if path.is_file())
+        paths.update(path for path in (module / "src").rglob("*") if path.is_file()
+                     and "__pycache__" not in path.parts and path.suffix != ".pyc")
     return {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(paths) if path.is_file()}
 
@@ -132,6 +134,49 @@ def start_server(server, created, pull_policy, suffix):
     server["repoDigests"] = image.get("RepoDigests", [])
 
 
+
+def opengemini_options(url=None, version=None, urls=None, replicas=None):
+    """Select explicit external openGemini coverage without silently expanding the owned server set."""
+    if url is None:
+        if version is not None or urls is not None or replicas is not None:
+            raise ValueError("openGemini deployment options require --opengemini-url")
+        return (["-Dfailsafe.excludes=**/OpenGemini*DockerIT.java"],
+                dict(status="excluded", reason="No external openGemini URL supplied; run its separate deployment matrix",
+                     ownedByRunner=False))
+
+    def normalize_endpoint(value):
+        value = value.strip().rstrip("/")
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc or not parsed.hostname:
+            raise ValueError("openGemini endpoints must be absolute HTTP(S) URLs")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("openGemini endpoint URLs must not contain credentials")
+        if parsed.query or parsed.fragment:
+            raise ValueError("openGemini endpoint URLs must not contain a query or fragment")
+        _ = parsed.port
+        return value
+
+    replicas = 1 if replicas is None else replicas
+    if replicas <= 0:
+        raise ValueError("--opengemini-replicas must be greater than zero")
+    endpoint = normalize_endpoint(url)
+    endpoints = [normalize_endpoint(value) for value in urls.split(",")] if urls is not None else [endpoint]
+    if endpoint not in endpoints:
+        endpoints.insert(0, endpoint)
+    endpoints = list(dict.fromkeys(endpoints))
+    parameters = ["-Dtsdb.it.opengemini.url=" + endpoint,
+                  "-Dtsdb.it.opengemini.urls=" + ",".join(endpoints),
+                  "-Dtsdb.it.opengemini.replicas=" + str(replicas)]
+    metadata = dict(status="included", url=endpoint, urls=endpoints, ownedByRunner=False,
+                    scope="External deployment; the runner does not start or remove these servers", replicas=replicas)
+    if version is not None:
+        if not version.strip():
+            raise ValueError("--opengemini-version must not be blank")
+        parameters.append("-Dtsdb.it.opengemini.version=" + version.strip())
+        metadata["expectedVersion"] = version.strip()
+    return parameters, metadata
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("unit", "docker"))
@@ -141,7 +186,19 @@ def main():
     parser.add_argument("--release-artifacts", action="store_true")
     parser.add_argument("--pull", choices=("missing", "never", "always"), default="missing")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--opengemini-url", help="Use an existing openGemini HTTP endpoint in Docker mode")
+    parser.add_argument("--opengemini-version", help="Expected version of the external openGemini deployment")
+    parser.add_argument("--opengemini-urls", help="Comma-separated HTTP endpoints of the same openGemini deployment")
+    parser.add_argument("--opengemini-replicas", type=int, help="Replication count for databases created by openGemini tests")
     args = parser.parse_args()
+    if args.mode != "docker" and any(value is not None for value in
+                                      (args.opengemini_url, args.opengemini_version, args.opengemini_urls, args.opengemini_replicas)):
+        parser.error("openGemini endpoint options apply only to Docker mode")
+    try:
+        external_parameters, external_metadata = opengemini_options(
+                args.opengemini_url, args.opengemini_version, args.opengemini_urls, args.opengemini_replicas)
+    except ValueError as error:
+        parser.error(str(error))
     suffix = uuid.uuid4().hex[:10]
     output = args.output or ROOT / ".local-test/ci" / (args.mode + "-" + suffix)
     output = output.resolve()
@@ -160,6 +217,8 @@ def main():
             command += ["-o"]
         profiles = ["release-artifacts"] if args.release_artifacts else []
         if args.mode == "docker":
+            summary["opengemini"] = external_metadata
+            command += external_parameters
             capture(["docker", "info", "--format", "{{.ServerVersion}}"])
             summary["servers"] = json.loads(SERVERS.read_text())
             for server in summary["servers"]:

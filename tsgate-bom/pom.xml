@@ -5,7 +5,7 @@
 
     <groupId>io.github.alandevise</groupId>
     <artifactId>tsgate-bom</artifactId>
-    <version>2.0.0</version>
+    <version>2.1.0</version>
     <packaging>pom</packaging>
     <name>TsGate BOM</name>
     <description>Dependency management for TsGate modules and their verified client runtime dependencies</description>
@@ -29,7 +29,7 @@
         <connection>scm:git:https://github.com/AlanDevise/TsGate.git</connection>
         <developerConnection>scm:git:ssh://git@github.com/AlanDevise/TsGate.git</developerConnection>
         <url>https://github.com/AlanDevise/TsGate</url>
-        <tag>HEAD</tag>
+        <tag>v2.1.0</tag>
     </scm>
 
     <!-- Standalone on purpose: consumers must not inherit the build's Spring Boot or test baselines. -->
@@ -80,6 +80,17 @@
             <dependency>
                 <groupId>io.github.alandevise</groupId>
                 <artifactId>tsgate-influxdb3-spring-boot-starter</artifactId>
+                <version>${tsgate.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>io.github.alandevise</groupId>
+                <artifactId>tsgate-opengemini</artifactId>
+                <version>${tsgate.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.alandevise</groupId>
+                <artifactId>tsgate-opengemini-spring-boot-starter</artifactId>
                 <version>${tsgate.version}</version>
             </dependency>
 

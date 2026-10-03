@@ -1,6 +1,7 @@
 package com.alandevise.tsgate.core;
 
 import com.alandevise.tsgate.adapter.TSDBAdapter;
+import com.alandevise.tsgate.exception.TSDBErrorCodeEnum;
 import com.alandevise.tsgate.exception.TSDBException;
 import com.alandevise.tsgate.model.*;
 import org.junit.jupiter.api.Test;
@@ -21,6 +22,15 @@ class TSDBAdapterDefaultMethodsTest {
         assertThat(adapter.write("db", record)).isTrue();
         assertThat(adapter.batchWrite("db", List.of(record))).isTrue();
         assertThat(adapter.getMaxBatchRecords()).isEqualTo(Integer.MAX_VALUE);
+    }
+
+    @Test void fallbackCountRejectsNullQueryBeforeCallingTheBackend() {
+        TSDBAdapter adapter = mock(TSDBAdapter.class, CALLS_REAL_METHODS);
+        assertThatThrownBy(() -> adapter.count("db", null))
+                .isInstanceOfSatisfying(TSDBException.class,
+                        failure -> assertThat(failure.getErrorCode()).isEqualTo(TSDBErrorCodeEnum.ARGUMENT_ERROR))
+                .hasMessage("query must not be null");
+        verify(adapter, never()).query(any(), any());
     }
 
     @Test void fallbackCountRemovesPagingWithoutMutatingTheOriginalQuery() {

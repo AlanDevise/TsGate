@@ -29,10 +29,11 @@ public class TSDBAdapterEnabledCondition implements Condition {
     }
 
     private static List<String> enabledAdapters(ConditionContext context) {
-        List<String> enabled = new ArrayList<>(3);
+        List<String> enabled = new ArrayList<>(4);
         addIfEnabled(context, enabled, "iotdb", "com.alandevise.tsgate.adapter.impl.IoTDBTableAdapter");
         addIfEnabled(context, enabled, "influxdb", "com.alandevise.tsgate.adapter.impl.InfluxDBAdapter");
         addIfEnabled(context, enabled, "influxdb1", "com.alandevise.tsgate.adapter.impl.InfluxDB1Adapter");
+        addIfEnabled(context, enabled, "opengemini", "com.alandevise.tsgate.adapter.impl.OpenGeminiAdapter");
         if (enabled.size() > 1) {
             throw new TSDBException(TSDBErrorCodeEnum.CONFIGURATION_ERROR,
                     "Only one TSDB adapter may be enabled; active adapters: " + String.join(", ", enabled)
@@ -100,6 +101,16 @@ public class TSDBAdapterEnabledCondition implements Condition {
         @Override
         public boolean matches(ConditionContext context, AnnotatedTypeMetadata metadata) {
             return enabledAdapters(context).contains("influxdb1");
+        }
+    }
+
+    /**
+     * Shared enablement condition for the openGemini starter and business components.
+     */
+    public static final class OpenGemini implements Condition {
+        @Override
+        public boolean matches(ConditionContext context, AnnotatedTypeMetadata metadata) {
+            return enabledAdapters(context).contains("opengemini");
         }
     }
 

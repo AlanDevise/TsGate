@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+ARG BUILD_IMAGE=golang:1.24.13-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac
+ARG RUNTIME_IMAGE=debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+FROM ${BUILD_IMAGE} AS build
+ARG VERSION
+ARG SOURCE_COMMIT
+WORKDIR /src
+COPY source.tar.gz /tmp/source.tar.gz
+RUN tar -xzf /tmp/source.tar.gz --strip-components=1 -C /src && rm /tmp/source.tar.gz
+ENV CGO_ENABLED=1 GOMAXPROCS=4
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    for app in ts-meta ts-store ts-sql ts-server; do \
+      go build -mod=mod -p 4 -ldflags "-s -w -X github.com/openGemini/openGemini/app.Version=${VERSION} -X github.com/openGemini/openGemini/app.GitBranch=v${VERSION} -X github.com/openGemini/openGemini/app.GitCommit=${SOURCE_COMMIT}" \
+      -o /out/${app} ./app/${app}/ || exit; done
+FROM ${RUNTIME_IMAGE}
+ARG VERSION
+ARG SOURCE_COMMIT
+ARG FIXTURE_SHA256
+LABEL com.alandevise.tsgate.opengemini.fixture.sha256="${FIXTURE_SHA256}" \
+      org.opencontainers.image.title="TsGate openGemini regression fixture" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      org.opencontainers.image.source="https://github.com/openGemini/openGemini"
+COPY --from=build /src/go.mod /src/go.sum /opt/opengemini/build/
+COPY --from=build /out/ /opt/opengemini/usr/bin/
+COPY --from=build /src/config/weakpasswd.properties /opt/opengemini/etc/weakpasswd.properties
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENV PATH="/opt/opengemini/usr/bin:${PATH}" GOMAXPROCS=2
+EXPOSE 8086 8091
+ENTRYPOINT ["/entrypoint.sh"]

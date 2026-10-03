@@ -39,14 +39,14 @@ class TSDBAdapterEnabledConditionTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"iotdb", "influxdb", "influxdb1"})
+    @ValueSource(strings = {"iotdb", "influxdb", "influxdb1", "opengemini"})
     void connectionSettingsDoNotEnableAnyBackend(String selected) {
         assertSelection(new MockEnvironment().withProperty("tsdb." + selected + ".database", "business_metrics"), null);
     }
 
     @ParameterizedTest
     @CsvSource({"iotdb,pool.node-urls[0]", "iotdb,pool.max-size", "influxdb,http-client.connect-timeout-ms",
-            "influxdb1,http-client.connect-timeout-ms"})
+            "influxdb1,http-client.connect-timeout-ms", "opengemini,http-client.connect-timeout-ms"})
     void nestedAndIndexedConfigurationDoesNotEnableItsBackend(String selected, String property) {
         assertSelection(new MockEnvironment().withProperty("tsdb." + selected + "." + property, "1"), null);
     }
@@ -81,27 +81,29 @@ class TSDBAdapterEnabledConditionTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"iotdb,influxdb", "iotdb,influxdb1", "influxdb,influxdb1"})
+    @CsvSource({"iotdb,influxdb", "iotdb,influxdb1", "influxdb,influxdb1",
+            "iotdb,opengemini", "influxdb,opengemini", "influxdb1,opengemini"})
     void everyExplicitlyEnabledPairConflicts(String first, String second) {
         assertConfigurationFailure(new MockEnvironment().withProperty("tsdb." + first + ".enable", "true")
                 .withProperty("tsdb." + second + ".enable", "true"));
     }
 
     @ParameterizedTest
-    @CsvSource({"iotdb,influxdb", "iotdb,influxdb1", "influxdb,influxdb1"})
+    @CsvSource({"iotdb,influxdb", "iotdb,influxdb1", "influxdb,influxdb1",
+            "iotdb,opengemini", "influxdb,opengemini", "influxdb1,opengemini"})
     void configuredPairsRemainInactiveWithoutEnableFlags(String first, String second) {
         assertSelection(new MockEnvironment().withProperty("tsdb." + first + ".database", "first_db")
                 .withProperty("tsdb." + second + ".database", "second_db"), null);
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"iotdb", "influxdb", "influxdb1"})
+    @ValueSource(strings = {"iotdb", "influxdb", "influxdb1", "opengemini"})
     void explicitTrueSelectsABackendWithoutConnectionSettings(String selected) {
         assertSelection(new MockEnvironment().withProperty("tsdb." + selected + ".enable", "true"), selected);
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"iotdb", "influxdb", "influxdb1"})
+    @ValueSource(strings = {"iotdb", "influxdb", "influxdb1", "opengemini"})
     void explicitFalseSuppressesEvenInvalidAndUnresolvedBackendConfiguration(String selected) {
         assertSelection(new MockEnvironment().withProperty("tsdb." + selected + ".enable", "false")
                 .withProperty("tsdb." + selected + ".database", "${MISSING_DISABLED_DATABASE}")
@@ -138,7 +140,8 @@ class TSDBAdapterEnabledConditionTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"TSDB_IOTDB_USERNAME,iotdb", "TSDB_INFLUXDB_URL,influxdb", "TSDB_INFLUXDB1_URL,influxdb1"})
+    @CsvSource({"TSDB_IOTDB_USERNAME,iotdb", "TSDB_INFLUXDB_URL,influxdb", "TSDB_INFLUXDB1_URL,influxdb1",
+            "TSDB_OPENGEMINI_URL,opengemini"})
     void relaxedEnvironmentConnectionNamesNeedAnExplicitEnableFlag(String variable, String selected) {
         MockEnvironment environment = new MockEnvironment();
         environment.getPropertySources().addFirst(new SystemEnvironmentPropertySource("test-systemEnvironment", Map.of(variable, "value")));
@@ -185,6 +188,21 @@ class TSDBAdapterEnabledConditionTest {
         }
     }
 
+    @Test void openGeminiDependencyDoesNotActivateInfluxDB1WithoutItsFlag() {
+        assertSelection(new MockEnvironment().withProperty("tsdb.opengemini.enable", "true"), "opengemini");
+    }
+
+    @Test void absentOpenGeminiAdapterIgnoresMalformedEnableFlag() throws Exception {
+        try (FilteredClassLoader loader = new FilteredClassLoader(
+                com.alandevise.tsgate.adapter.impl.OpenGeminiAdapter.class)) {
+            ConditionContext context = context(new MockEnvironment()
+                    .withProperty("tsdb.opengemini.enable", "invalid")
+                    .withProperty("tsdb.influxdb1.enable", "true"), loader);
+            assertThat(new TSDBAdapterEnabledCondition.InfluxDB1().matches(context, null)).isTrue();
+            assertThat(new TSDBAdapterEnabledCondition.OpenGemini().matches(context, null)).isFalse();
+        }
+    }
+
     @Test void noClasspathAdaptersMeansNoBackendEvenWithExplicitFlags() throws Exception {
         try (FilteredClassLoader loader = new FilteredClassLoader("com.alandevise.tsgate.adapter.impl")) {
             assertThat(common.matches(context(new MockEnvironment().withProperty("tsdb.iotdb.enable", "true"), loader), null)).isFalse();
@@ -226,6 +244,7 @@ class TSDBAdapterEnabledConditionTest {
         assertThat(new TSDBAdapterEnabledCondition.IoTDB().matches(context, null)).isEqualTo("iotdb".equals(selected));
         assertThat(new TSDBAdapterEnabledCondition.InfluxDB().matches(context, null)).isEqualTo("influxdb".equals(selected));
         assertThat(new TSDBAdapterEnabledCondition.InfluxDB1().matches(context, null)).isEqualTo("influxdb1".equals(selected));
+        assertThat(new TSDBAdapterEnabledCondition.OpenGemini().matches(context, null)).isEqualTo("opengemini".equals(selected));
     }
 
     private MockEnvironment yaml(String text) throws Exception {
