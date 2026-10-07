@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -62,6 +63,8 @@ def main(argv=None):
     parser.add_argument("--output", type=Path)
     parser.add_argument("--json", type=Path)
     args = parser.parse_args(argv)
+    registration = runpy.run_path(str(Path(__file__).with_name("verify-backend-registration.py")))
+    registration["verify"](ROOT)
     try:
         event = json.loads(args.event_file.read_text())
         if not isinstance(event, dict):

@@ -793,6 +793,7 @@ public class InfluxDB1Adapter implements TSDBAdapter {
         List<PreparedWriteBatch> batches;
         HttpUrl url;
         try {
+            validateBatchSize(records);
             // Snapshot, validate, and encode every record before sending to prevent partial writes caused by invalid data.
             snapshot = List.copyOf(records);
             validateBatchSize(snapshot);

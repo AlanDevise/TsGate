@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import signal
 import subprocess
@@ -237,6 +238,8 @@ def main(argv=None):
                                         status="not-run") for kind in BACKEND_TESTS})
     created = []
     try:
+        registration = runpy.run_path(str(Path(__file__).with_name("verify-backend-registration.py")))
+        summary["backendRegistration"] = registration["verify"](ROOT)
         summary["java"] = capture(["java", "-version"])
         summary["maven"] = capture(["mvn", "-version"])
         summary["gitCommit"] = git_commit()

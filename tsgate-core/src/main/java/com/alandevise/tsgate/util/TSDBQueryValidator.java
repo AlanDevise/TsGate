@@ -3,9 +3,11 @@ package com.alandevise.tsgate.util;
 import com.alandevise.tsgate.exception.TSDBErrorCodeEnum;
 import com.alandevise.tsgate.exception.TSDBException;
 import com.alandevise.tsgate.model.AggregationSpec;
+import com.alandevise.tsgate.model.QueryFilter;
 import com.alandevise.tsgate.model.TSDBQuery;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.function.UnaryOperator;
 
@@ -22,9 +24,12 @@ public final class TSDBQueryValidator {
     }
 
     /**
-     * Rejects absent queries, non-positive explicit limits, negative offsets, and reversed time bounds.
+     * Rejects absent queries, invalid pagination or time bounds, and malformed filter operands.
      * <p>Null limits and offsets, zero offsets, equal or one-sided time bounds, and positive pagination-probe
-     * limits remain valid. Backend implementations retain responsibility for their own capability and size limits.</p>
+     * limits remain valid. Comparisons require one operand, BETWEEN requires exactly two, and IN requires at least one.
+     * Filter operands must not contain null or non-finite Float/Double values. String literals, including the text
+     * {@code "null"}, retain their literal meaning. Backend implementations retain responsibility for capability,
+     * numeric precision and size limits. Native SQL and the builder's optional-filter normalization are unchanged.</p>
      *
      * @param query common query model to validate; its state is not modified
      * @throws TSDBException with {@code ARGUMENT_ERROR} when a shared argument is invalid
@@ -42,6 +47,35 @@ public final class TSDBQueryValidator {
         if (query.getStartTime() != null && query.getEndTime() != null
                 && query.getStartTime() > query.getEndTime()) {
             throw argument("startTime must be less than or equal to endTime");
+        }
+        for (QueryFilter filter : query.getFilters()) {
+            validateFilter(filter);
+        }
+    }
+
+    /** Checks operand shape and portable literal validity without changing caller-owned filters. */
+    private static void validateFilter(QueryFilter filter) {
+        if (filter == null || filter.column() == null || filter.column().isBlank() || filter.operator() == null) {
+            throw argument("Invalid query filter: column and operator must not be empty");
+        }
+        List<Object> values = filter.values();
+        int required = switch (filter.operator()) {
+            case BETWEEN -> 2;
+            case IN -> -1;
+            default -> 1;
+        };
+        if (values.isEmpty() || (required > 0 && values.size() != required)) {
+            String expected = required < 0 ? "at least one value" : "exactly " + required + " value(s)";
+            throw argument(filter.operator() + " filter requires " + expected + ": " + filter.column());
+        }
+        for (Object value : values) {
+            if (value == null) {
+                throw argument("Filter values must not be null: " + filter.column());
+            }
+            if ((value instanceof Double doubleValue && !Double.isFinite(doubleValue))
+                    || (value instanceof Float floatValue && !Float.isFinite(floatValue))) {
+                throw argument("Filter numbers must be finite: " + filter.column());
+            }
         }
     }
 

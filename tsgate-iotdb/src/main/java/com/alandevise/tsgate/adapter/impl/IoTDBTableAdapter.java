@@ -42,10 +42,12 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Supplier;
 
@@ -363,6 +365,7 @@ public class IoTDBTableAdapter implements TSDBAdapter {
         List<TSDBRecord> snapshot;
         Map<String, TableBatch> batches;
         try {
+            validateBatchSize(records);
             snapshot = List.copyOf(records);
             validateBatchSize(snapshot);
             batches = buildBatches(snapshot);
@@ -486,7 +489,7 @@ public class IoTDBTableAdapter implements TSDBAdapter {
     }
 
     /**
-     * Pre-scan records by measurement and collect each table's records and column types.
+     * Pre-scan records by lowercase physical table identity and collect each table's records and column types.
      * @param records shared records to write; for example {@code List.of(record1, record2)}
      * @return column contexts grouped by table name
      * @author Alan Zhang [initiator@alandevise.com]
@@ -499,7 +502,8 @@ public class IoTDBTableAdapter implements TSDBAdapter {
                 continue;
             }
             validateRecord(tsdbRecord);
-            TableBatch batch = batches.computeIfAbsent(tsdbRecord.measurement(), TableBatch::new);
+            String physicalTableName = tsdbRecord.measurement().toLowerCase(Locale.ROOT);
+            TableBatch batch = batches.computeIfAbsent(physicalTableName, TableBatch::new);
             batch.addRecord(tsdbRecord);
         }
         for (TableBatch batch : batches.values()) {
@@ -892,6 +896,13 @@ public class IoTDBTableAdapter implements TSDBAdapter {
                                  SessionDataSet dataSet, long rowBudget)
             throws IoTDBConnectionException, StatementExecutionException {
         List<String> columnNames = dataSet.getColumnNames();
+        Set<String> outputColumns = new HashSet<>();
+        for (String columnName : columnNames) {
+            if (!outputColumns.add(columnName)) {
+                throw new TSDBException(TSDBErrorCodeEnum.QUERY_ERROR,
+                        "IoTDB query result contains duplicate output column: " + columnName);
+            }
+        }
         result.setColumns(columnNames);
 
         List<Map<String, Object>> rows = new ArrayList<>();

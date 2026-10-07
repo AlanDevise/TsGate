@@ -8,6 +8,8 @@ import com.alandevise.tsgate.model.*;
 import org.apache.iotdb.isession.ITableSession;
 import org.apache.iotdb.session.TableSessionBuilder;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -32,6 +34,43 @@ class IoTDBDockerIT extends DatabaseContractIT {
         if(adapter!=null) adapter.close();
         if(admin!=null) { try { admin.executeNonQueryStatement("DROP DATABASE "+db); } finally { admin.close(); } }
     }
+    @Test void directBatchRecordLimitRejectsBeforeCopyAndPreservesReadback() {
+        adapter.close();
+        IoTDBProperties config = config(db);
+        config.setMaxBatchRecords(3);
+        adapter = new IoTDBTableAdapter(config, config.getPool(), false);
+        adapter.init();
+        template = new TGTemplate(adapter);
+        assertTrue(adapter.write(null, record(BASE, "existing", 0d)));
+        Collection<TSDBRecord> oversized = new AbstractCollection<>() {
+            @Override public int size() { return adapter.getMaxBatchRecords() + 1; }
+            @Override public Iterator<TSDBRecord> iterator() {
+                throw new AssertionError("Oversized batch must be rejected before traversal");
+            }
+        };
+        TSDBBatchWriteException failure = assertThrows(TSDBBatchWriteException.class,
+                () -> adapter.batchWriteDetailed(null, oversized));
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR, failure.getErrorCode());
+        assertEquals(BatchCommitStateEnum.NOT_COMMITTED, failure.getResult().commitState());
+        assertEquals(4, failure.getResult().requestedRecords());
+        assertEquals(0, failure.getResult().validatedRecords());
+        assertEquals(0, failure.getResult().committedRecords());
+        assertEquals(0, failure.getResult().totalBatches());
+        assertEquals(List.of(0d), rows(query()).stream()
+                .map(row -> ((Number) row.get("value")).doubleValue()).toList());
+        assertEquals(1, adapter.count(null, query()));
+
+        List<TSDBRecord> boundary = List.of(record(BASE + 1, "next", 1d),
+                record(BASE + 2, "next", 2d), record(BASE + 3, "next", 3d));
+        assertEquals(adapter.getMaxBatchRecords(), boundary.size());
+        BatchWriteResult result = adapter.batchWriteDetailed(null, boundary);
+        assertTrue(result.isSuccess());
+        assertEquals(3, result.committedRecords());
+        assertEquals(List.of(0d, 1d, 2d, 3d), rows(query()).stream()
+                .map(row -> ((Number) row.get("value")).doubleValue()).toList());
+        assertEquals(4, adapter.count(null, query()));
+    }
+
     @Test void aggregateOutputCollisionsFailWhileDistinctAliasesRoundTrip() {
         assertTrue(adapter.batchWrite(null, List.of(record(BASE, "a", 1), record(BASE + 1, "b", 4))));
         TSDBQuery query = query();
@@ -90,6 +129,108 @@ class IoTDBDockerIT extends DatabaseContractIT {
             assertTrue(records.get(row).fields().containsKey(valueNames[row % 3]));
         }
     }
+    @Test void mixedCaseTableNamesSharePhysicalTabletsAndRoundTrip() {
+        String[] tableNames = {"TELEMETRY", "telemetry", "TeLeMeTrY"};
+        List<TSDBRecord> records = new ArrayList<>();
+        for (int row = 0; row < 6; row++) {
+            Map<String, Object> fields = new LinkedHashMap<>();
+            fields.put("value", row + 0.25d);
+            fields.put("ival", row % 2 == 0 ? null : row);
+            fields.put("label", "row-" + row);
+            records.add(new TSDBRecord(tableNames[row % tableNames.length], BASE + row,
+                    Map.of("device", "sensor-" + row), fields));
+        }
+        BatchWriteResult result = adapter.batchWriteDetailed(null, records);
+        assertTrue(result.isSuccess());
+        assertEquals(6, result.committedRecords());
+        assertEquals(2, result.totalBatches());
+        assertEquals(2, result.committedBatches());
+        TSDBQuery query = query();
+        query.setMeasurement("TELEMETRY");
+        List<Map<String, Object>> readback = rows(query);
+        assertEquals(6, readback.size());
+        for (int row = 0; row < readback.size(); row++) {
+            Map<String, Object> actual = readback.get(row);
+            assertEquals(BASE + row, ((Number) actual.get("time")).longValue());
+            assertEquals("sensor-" + row, actual.get("device"));
+            assertEquals(row + 0.25d, actual.get("value"));
+            assertEquals(row % 2 == 0 ? null : row, actual.get("ival"));
+            assertEquals("row-" + row, actual.get("label"));
+            assertEquals(tableNames[row % tableNames.length], records.get(row).measurement());
+        }
+        assertEquals(6, adapter.count(null, query));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"type", "role"})
+    void mixedCaseTableConflictsRejectTheWholeBatchWithoutChangingStoredRows(String conflict) throws Exception {
+        admin.executeNonQueryStatement("CREATE TABLE earlier_table (device STRING TAG, value DOUBLE FIELD)");
+        assertTrue(adapter.batchWrite(null, List.of(record(BASE, "existing", 100),
+                new TSDBRecord("earlier_table", BASE, Map.of("device", "existing"), Map.of("value", 200d)))));
+        List<TSDBRecord> records = new ArrayList<>();
+        for (int row = 1; row <= 4; row++) {
+            records.add(new TSDBRecord("earlier_table", BASE + row, Map.of("device", "new"),
+                    Map.of("value", (double) row)));
+        }
+        records.add(record(BASE + 1, "new", 1));
+        records.add(record(BASE + 2, "new", 2));
+        records.add(conflict.equals("type")
+                ? new TSDBRecord("TELEMETRY", BASE + 3, Map.of("device", "new"), Map.of("value", 3L))
+                : new TSDBRecord("TeLeMeTrY", BASE + 3, Map.of("other", "new"),
+                        Map.of("value", 3d, "device", "field")));
+        TSDBBatchWriteException error = assertThrows(TSDBBatchWriteException.class,
+                () -> adapter.batchWriteDetailed(null, records));
+        assertEquals(TSDBErrorCodeEnum.METADATA_ERROR, error.getErrorCode());
+        assertEquals(BatchCommitStateEnum.NOT_COMMITTED, error.getResult().commitState());
+        assertEquals(0, error.getResult().committedRecords());
+        assertEquals(0, error.getResult().committedBatches());
+        List<Map<String, Object>> telemetry = rows(query());
+        assertEquals(1, telemetry.size());
+        assertEquals(BASE, ((Number) telemetry.get(0).get("time")).longValue());
+        assertEquals("existing", telemetry.get(0).get("device"));
+        assertEquals(100d, telemetry.get(0).get("value"));
+        TSDBQuery earlier = query();
+        earlier.setMeasurement("earlier_table");
+        List<Map<String, Object>> earlierRows = rows(earlier);
+        assertEquals(1, earlierRows.size());
+        assertEquals(BASE, ((Number) earlierRows.get(0).get("time")).longValue());
+        assertEquals("existing", earlierRows.get(0).get("device"));
+        assertEquals(200d, earlierRows.get(0).get("value"));
+    }
+
+    @Test void filterOperandValidationPreservesValidQueriesAndExistingRows() {
+        seed();
+        TSDBQuery query = query();
+        query.setFilters(List.of(new QueryFilter("value", OperatorEnum.BETWEEN, List.of(2d, 3d))));
+        assertEquals(List.of(2d, 3d), rows(query).stream().map(row -> row.get("value")).toList());
+        assertEquals(2, adapter.count(null, query));
+        query.setFilters(List.of(new QueryFilter("value", OperatorEnum.EQ, List.of(3d))));
+        assertEquals(List.of(3d), rows(query).stream().map(row -> row.get("value")).toList());
+        assertEquals(1, adapter.count(null, query));
+        query.setFilters(List.of(new QueryFilter("value", OperatorEnum.IN, List.of(1d, 4d))));
+        assertEquals(List.of(1d, 4d), rows(query).stream().map(row -> row.get("value")).toList());
+        assertEquals(2, adapter.count(null, query));
+
+        List<QueryFilter> invalidFilters = List.of(
+                new QueryFilter("value", OperatorEnum.BETWEEN, List.of(1d, 2d, 3d)),
+                new QueryFilter("value", OperatorEnum.EQ, List.of(1d, 2d)),
+                new QueryFilter("value", OperatorEnum.EQ, List.of(Double.NaN)),
+                new QueryFilter("value", OperatorEnum.EQ, List.of(Double.POSITIVE_INFINITY)),
+                new QueryFilter("value", OperatorEnum.EQ, List.of(Float.NEGATIVE_INFINITY)),
+                new QueryFilter("value", OperatorEnum.EQ, Arrays.asList((Object) null)),
+                new QueryFilter("value", OperatorEnum.IN, Arrays.asList(1d, null)));
+        for (QueryFilter filter : invalidFilters) {
+            query.setFilters(List.of(filter));
+            assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                    assertThrows(TSDBException.class, () -> adapter.query(null, query)).getErrorCode());
+            assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                    assertThrows(TSDBException.class, () -> adapter.count(null, query)).getErrorCode());
+            assertEquals(List.of(1d, 2d, 3d, 4d),
+                    rows(query()).stream().map(row -> row.get("value")).toList());
+            assertEquals(4, adapter.count(null, query()));
+        }
+    }
+
     @Test void explicitDatabaseDoesNotLeakIntoDefaultSession() throws Exception {
         String other=db+"_other"; admin.executeNonQueryStatement("CREATE DATABASE "+other);
         try {
@@ -100,6 +241,43 @@ class IoTDBDockerIT extends DatabaseContractIT {
             assertEquals("default",adapter.executeQuery("SELECT * FROM telemetry").getRows().get(0).get("device"));
         } finally { admin.executeNonQueryStatement("DROP DATABASE "+other); }
     }
+    @Test void nativeDuplicateOutputColumnsFailWithoutPoisoningTheOnlyPooledSession() throws Exception {
+        seed();
+        adapter.close();
+        IoTDBProperties config = config(db);
+        config.getPool().setMaxSize(1);
+        adapter = new IoTDBTableAdapter(config, config.getPool(), false);
+        adapter.init();
+        String duplicateSql = "SELECT ival AS duplicate, value AS duplicate FROM telemetry";
+        for (boolean empty : List.of(false, true)) {
+            String sql = duplicateSql + (empty ? " WHERE time < " + BASE : "") + " ORDER BY time";
+            try (var nativeResult = admin.executeQueryStatement(sql)) {
+                assertEquals(List.of("duplicate", "duplicate"), nativeResult.getColumnNames());
+                assertEquals(!empty, nativeResult.hasNext());
+                if (!empty) {
+                    var fields = nativeResult.next().getFields();
+                    assertEquals(2, fields.size());
+                    assertTrue(fields.get(0) == null || fields.get(0).getDataType() == null);
+                    assertEquals(1d, fields.get(1).getDoubleV());
+                }
+            }
+            TSDBException failure = assertThrows(TSDBException.class, () -> adapter.executeQuery(sql));
+            assertEquals(TSDBErrorCodeEnum.QUERY_ERROR, failure.getErrorCode());
+            assertTrue(failure.getMessage().contains("duplicate output column: duplicate"));
+            assertEquals(List.of(1d, 2d, 3d, 4d),
+                    rows(query()).stream().map(row -> row.get("value")).toList());
+            assertEquals(4, adapter.count(null, query()));
+        }
+        QueryResult caseDistinct = adapter.executeQuery(
+                "SELECT value AS \"Upper\", value AS \"upper\" FROM telemetry ORDER BY time");
+        assertEquals(List.of("Upper", "upper"), caseDistinct.getColumns());
+        assertEquals(4, caseDistinct.getRowCount());
+        for (int index = 0; index < caseDistinct.getRowCount(); index++) {
+            assertEquals(index + 1d, caseDistinct.getRows().get(index).get("Upper"));
+            assertEquals(index + 1d, caseDistinct.getRows().get(index).get("upper"));
+        }
+    }
+
     @Test void queryErrorDoesNotPoisonPool() {
         assertTrue(adapter.write(null,record(BASE,"a",1)));
         assertThrows(TSDBException.class,()->adapter.executeQuery("SELECT unknown_field FROM telemetry"));

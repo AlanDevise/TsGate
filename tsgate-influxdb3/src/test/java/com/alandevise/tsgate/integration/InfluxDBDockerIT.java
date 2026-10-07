@@ -29,6 +29,84 @@ class InfluxDBDockerIT extends DatabaseContractIT {
         HttpRequest r=HttpRequest.newBuilder(URI.create(URL+path)).header("Content-Type","application/json").method(method,body==null?HttpRequest.BodyPublishers.noBody():HttpRequest.BodyPublishers.ofString(body)).build();
         HttpResponse<String> response=admin.send(r,HttpResponse.BodyHandlers.ofString()); assertTrue(response.statusCode()/100==2,response.statusCode()+" "+response.body());
     }
+    @Test void directBatchRecordLimitRejectsBeforeCopyAndPreservesReadback() {
+        adapter.close();
+        InfluxDBProperties config = new InfluxDBProperties();
+        config.setUrl(URL);
+        config.setDatabase(db);
+        config.setMaxBatchRecords(3);
+        config.setStrictCursorSql(StrictCursorSqlStrategyEnum.valueOf(System.getProperty(
+                "tsdb.it.influxdb.strict-cursor-sql", "OR").replace('-', '_').toUpperCase(Locale.ROOT)));
+        adapter = new InfluxDBAdapter(config, false);
+        adapter.init();
+        template = new TGTemplate(adapter);
+        assertTrue(adapter.write(null, record(BASE, "existing", 0d)));
+        Collection<TSDBRecord> oversized = new AbstractCollection<>() {
+            @Override public int size() { return adapter.getMaxBatchRecords() + 1; }
+            @Override public Iterator<TSDBRecord> iterator() {
+                throw new AssertionError("Oversized batch must be rejected before traversal");
+            }
+        };
+        TSDBBatchWriteException failure = assertThrows(TSDBBatchWriteException.class,
+                () -> adapter.batchWriteDetailed(null, oversized));
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR, failure.getErrorCode());
+        assertEquals(BatchCommitStateEnum.NOT_COMMITTED, failure.getResult().commitState());
+        assertEquals(4, failure.getResult().requestedRecords());
+        assertEquals(0, failure.getResult().validatedRecords());
+        assertEquals(0, failure.getResult().committedRecords());
+        assertEquals(0, failure.getResult().totalBatches());
+        assertEquals(List.of(0d), rows(query()).stream()
+                .map(row -> ((Number) row.get("value")).doubleValue()).toList());
+        assertEquals(1, adapter.count(null, query()));
+
+        List<TSDBRecord> boundary = List.of(record(BASE + 1, "next", 1d),
+                record(BASE + 2, "next", 2d), record(BASE + 3, "next", 3d));
+        assertEquals(adapter.getMaxBatchRecords(), boundary.size());
+        BatchWriteResult result = adapter.batchWriteDetailed(null, boundary);
+        assertTrue(result.isSuccess());
+        assertEquals(3, result.committedRecords());
+        assertEquals(List.of(0d, 1d, 2d, 3d), rows(query()).stream()
+                .map(row -> ((Number) row.get("value")).doubleValue()).toList());
+        assertEquals(4, adapter.count(null, query()));
+    }
+
+    @Test
+    void sharedFilterRulesRejectMalformedInputsAndPreserveReadback() {
+        seed();
+        List<QueryFilter> valid = List.of(
+                new QueryFilter("value", OperatorEnum.BETWEEN, List.of(2d, 3d)),
+                new QueryFilter("value", OperatorEnum.EQ, List.of(3d)),
+                new QueryFilter("value", OperatorEnum.IN, List.of(1d, 4d)));
+        List<List<Double>> expected = List.of(List.of(2d, 3d), List.of(3d), List.of(1d, 4d));
+        for (int index = 0; index < valid.size(); index++) {
+            TSDBQuery filtered = query();
+            filtered.setFilters(List.of(valid.get(index)));
+            List<Double> values = adapter.query(null, filtered).getRows().stream()
+                    .map(row -> ((Number) row.get("value")).doubleValue()).toList();
+            assertEquals(expected.get(index), values);
+            assertEquals(expected.get(index).size(), adapter.count(null, filtered));
+        }
+        List<QueryFilter> invalid = List.of(
+                new QueryFilter("value", OperatorEnum.EQ, List.of(1d, 2d)),
+                new QueryFilter("value", OperatorEnum.BETWEEN, List.of(1d)),
+                new QueryFilter("value", OperatorEnum.BETWEEN, List.of(1d, 2d, 3d)),
+                new QueryFilter("value", OperatorEnum.IN, List.of()),
+                new QueryFilter("value", OperatorEnum.EQ, Collections.singletonList(null)),
+                new QueryFilter("value", OperatorEnum.IN, Arrays.asList(1d, null, 2d)),
+                new QueryFilter("value", OperatorEnum.GT, List.of(Double.NaN)),
+                new QueryFilter("value", OperatorEnum.LE, List.of(Double.POSITIVE_INFINITY)));
+        for (QueryFilter filter : invalid) {
+            TSDBQuery filtered = query();
+            filtered.setFilters(List.of(filter));
+            assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                    assertThrows(TSDBException.class, () -> adapter.query(null, filtered)).getErrorCode());
+            assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                    assertThrows(TSDBException.class, () -> adapter.count(null, filtered)).getErrorCode());
+        }
+        assertEquals(4, adapter.query(null, query()).getRowCount());
+        assertEquals(4, adapter.count(null, query()));
+    }
+
     @Test void encodedBatchBudgetRejectsBeforeWritingAndAllowsConfiguredReadback() {
         assertTrue(adapter.write(null, record(BASE, "existing", 1)));
         initializeBatchBudget(1);
@@ -72,6 +150,16 @@ class InfluxDBDockerIT extends DatabaseContractIT {
         assertEquals(1d, ((Number) row.get("minimum")).doubleValue());
         assertEquals(1, adapter.count(null, query));
         assertEquals(2, adapter.count(null, query()));
+    }
+
+    @Test void duplicateNativeAliasesFailWithoutAffectingSubsequentReads() {
+        assertTrue(adapter.write(null, record(BASE, "a", 1)));
+        TSDBException failure = assertThrows(TSDBException.class, () -> adapter.executeQuery(
+                "SELECT value AS duplicate, device AS duplicate FROM telemetry"));
+        // A server-side duplicate-name rejection and a malformed successful JSON response both fail the query.
+        assertEquals(TSDBErrorCodeEnum.QUERY_ERROR, failure.getErrorCode());
+        assertEquals(1, adapter.query(null, query()).getRowCount());
+        assertEquals(1L, adapter.count(null, query()));
     }
 
     @Test void lineProtocolRejectsNewlineBeforeCommittingAnyRow() {

@@ -335,6 +335,7 @@ public class InfluxDBAdapter implements TSDBAdapter {
         List<PreparedWriteBatch> batches;
         HttpUrl url;
         try {
+            validateBatchSize(records);
             // Snapshot, validate, and encode every record before sending to prevent partial writes caused by invalid data.
             snapshot = List.copyOf(records);
             validateBatchSize(snapshot);
@@ -1881,6 +1882,8 @@ public class InfluxDBAdapter implements TSDBAdapter {
         // Bound decompressed bytes even for chunked or compressed responses with no content length.
         try (InputStream input = new BoundedResponseInputStream(response.body().byteStream(), maxQueryResponseBytes);
              JsonParser parser = objectMapper.getFactory().createParser(input)) {
+            // Reject ambiguous columns before a Map can silently overwrite their earlier values.
+            parser.enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
             JsonToken token = parser.nextToken();
             if (token == null) {
                 throw new TSDBException(TSDBErrorCodeEnum.QUERY_ERROR,

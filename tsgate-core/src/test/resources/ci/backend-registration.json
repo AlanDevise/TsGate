@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "backends": [
+    {
+      "id": "iotdb",
+      "module": "tsgate-iotdb",
+      "adapter": "com.alandevise.tsgate.adapter.impl.IoTDBTableAdapter",
+      "enableId": "iotdb",
+      "condition": "IoTDB",
+      "properties": "com.alandevise.tsgate.config.IoTDBProperties",
+      "starter": "tsgate-iotdb-spring-boot-starter",
+      "autoConfiguration": "com.alandevise.tsgate.autoconfigure.IoTDBTSDBAutoConfiguration",
+      "deployment": {"kind": "representative", "backend": "iotdb", "job": "docker"}
+    },
+    {
+      "id": "influxdb3",
+      "module": "tsgate-influxdb3",
+      "adapter": "com.alandevise.tsgate.adapter.impl.InfluxDBAdapter",
+      "enableId": "influxdb",
+      "condition": "InfluxDB",
+      "properties": "com.alandevise.tsgate.config.InfluxDBProperties",
+      "starter": "tsgate-influxdb3-spring-boot-starter",
+      "autoConfiguration": "com.alandevise.tsgate.autoconfigure.InfluxDBTSDBAutoConfiguration",
+      "deployment": {"kind": "representative", "backend": "influxdb", "job": "docker"}
+    },
+    {
+      "id": "influxdb1",
+      "module": "tsgate-influxdb1",
+      "adapter": "com.alandevise.tsgate.adapter.impl.InfluxDB1Adapter",
+      "enableId": "influxdb1",
+      "condition": "InfluxDB1",
+      "properties": "com.alandevise.tsgate.config.InfluxDB1Properties",
+      "starter": "tsgate-influxdb1-spring-boot-starter",
+      "autoConfiguration": "com.alandevise.tsgate.autoconfigure.InfluxDB1TSDBAutoConfiguration",
+      "deployment": {"kind": "representative", "backend": "influxdb1", "job": "docker"}
+    },
+    {
+      "id": "opengemini",
+      "module": "tsgate-opengemini",
+      "adapter": "com.alandevise.tsgate.adapter.impl.OpenGeminiAdapter",
+      "enableId": "opengemini",
+      "condition": "OpenGemini",
+      "properties": "com.alandevise.tsgate.config.OpenGeminiProperties",
+      "starter": "tsgate-opengemini-spring-boot-starter",
+      "autoConfiguration": "com.alandevise.tsgate.autoconfigure.OpenGeminiTSDBAutoConfiguration",
+      "deployment": {
+        "kind": "matrix",
+        "job": "opengemini",
+        "selector": "opengemini",
+        "runner": "tsgate-opengemini/src/test/scripts/run-matrix.py"
+      }
+    }
+  ]
+}

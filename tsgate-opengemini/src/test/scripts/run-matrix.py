@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import signal
 import subprocess
@@ -353,6 +354,8 @@ def main(argv=None):
                    environments=[dict(version=version, mode=mode, selected=(version, mode) in selected,
                                       status="not-run") for version, mode in MATRIX])
     try:
+        registration = runpy.run_path(str(ROOT / "tsgate-core/src/test/scripts/verify-backend-registration.py"))
+        summary["backendRegistration"] = registration["verify"](ROOT)
         if not ENVIRONMENT.is_file():
             raise RuntimeError("Missing environment fixture: " + str(ENVIRONMENT))
         summary["toolchain"] = toolchain()

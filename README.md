@@ -2,7 +2,7 @@
 
 <p align="center"><img src="assets/tsgate-logo.png" alt="TsGate logo" width="640"></p>
 
-![Version](https://img.shields.io/badge/version-2.1.2-blue)
+![Version](https://img.shields.io/badge/version-2.1.3-blue)
 ![Java](https://img.shields.io/badge/Java-17%2B-orange)
 ![Spring Boot tested](https://img.shields.io/badge/Boot_tested-2.7.18_%7C_3.5.14_%7C_4.1.0-green)
 ![IoTDB tested](https://img.shields.io/badge/IoTDB_tested-2.0.2_%7C_2.0.10_%7C_2.0.11-blue)
@@ -31,7 +31,7 @@ Applications can integrate an adapter directly or use its Spring Boot starter. E
 
 For Spring Boot applications, add the chosen dependency inside `<dependencies>` in `pom.xml`. Each starter includes its adapter and the shared core.
 
-These examples use **2.1.0, published to Maven Central**. The latest GitHub release is **2.1.2**; install that tag from source before using `2.1.2` dependencies. Maven Central has not been updated.
+These examples use **2.1.3**. See [publication status and verification records](https://github.com/AlanDevise/TsGate/wiki/EN-Testing-and-Publishing).
 
 ### InfluxDB 1.x
 
@@ -39,7 +39,7 @@ These examples use **2.1.0, published to Maven Central**. The latest GitHub rele
 <dependency>
     <groupId>io.github.alandevise</groupId>
     <artifactId>tsgate-influxdb1-spring-boot-starter</artifactId>
-    <version>2.1.0</version>
+    <version>2.1.3</version>
 </dependency>
 ```
 
@@ -49,7 +49,7 @@ These examples use **2.1.0, published to Maven Central**. The latest GitHub rele
 <dependency>
     <groupId>io.github.alandevise</groupId>
     <artifactId>tsgate-iotdb-spring-boot-starter</artifactId>
-    <version>2.1.0</version>
+    <version>2.1.3</version>
 </dependency>
 ```
 
@@ -135,6 +135,8 @@ Tablet RPC encoding/compression is enabled by default. For older IoTDB servers w
 InfluxDB 3 strict composite cursor pagination defaults to `tsdb.influxdb.strict-cursor-sql: or`. An explicit `union-all` strategy accommodates older query planners while preserving complete ordering and query limits. It may increase server-side scanning; the bilingual Wiki guides explain its scope and verified combinations.
 
 Maven artifacts use the GitHub-identity groupId `io.github.alandevise` and Java packages use `com.alandevise.tsgate.*`. Strict cursors preserve backend column identity and reject invalid time boundaries. All adapters have idempotent initialization and terminal closure; IoTDB applications must create a new instance after close. The bilingual Wiki documents cursor keys, supported Map result types and lifecycle rules.
+
+Version **2.1.3** validates structured-filter operands, merges IoTDB physical table-name case variants before batch checks, verifies backend registration in test/CI, rejects duplicate IoTDB/InfluxDB 3 result keys, and checks direct-adapter batch counts before copying inputs. It retains the public API, main architecture, configuration defaults and Java 17 baseline. See the [2.1.3 release notes](https://github.com/AlanDevise/TsGate/wiki/EN-Release-Notes-2.1.3) for upgrade guidance and verification scope.
 
 Version **2.1.2** prevents redirected HTTP writes from reporting success, rejects missing InfluxDB 3 query JSON, checks aggregate output-name collisions, adds a configurable 64 MiB HTTP batch budget and caches POJO read plans. The public API, main architecture and Java 17 baseline are retained. See the [2.1.2 release notes](https://github.com/AlanDevise/TsGate/wiki/EN-Release-Notes-2.1.2) for behavior and validation scope.
 

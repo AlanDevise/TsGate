@@ -28,6 +28,9 @@ class MatrixRunnerTest(unittest.TestCase):
         self.root_patch = patch.object(matrix, "ROOT", self.root)
         self.root_patch.start()
         self.addCleanup(self.root_patch.stop)
+        registration = patch.object(matrix.runpy, "run_path", return_value={"verify": lambda root: {"status": "passed"}})
+        registration.start()
+        self.addCleanup(registration.stop)
         self.args = argparse.Namespace(spring_boot="2.7.18", maven_repo=None, offline=False,
                                        maven_timeout=30, environment_timeout=30, inspect_timeout=30, stop_timeout=30)
 

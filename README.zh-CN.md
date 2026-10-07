@@ -2,7 +2,7 @@
 
 <p align="center"><img src="assets/tsgate-logo.png" alt="TsGate logo" width="640"></p>
 
-![Version](https://img.shields.io/badge/version-2.1.2-blue)
+![Version](https://img.shields.io/badge/version-2.1.3-blue)
 ![Java](https://img.shields.io/badge/Java-17%2B-orange)
 ![Spring Boot tested](https://img.shields.io/badge/Boot_tested-2.7.18_%7C_3.5.14_%7C_4.1.0-green)
 ![IoTDB tested](https://img.shields.io/badge/IoTDB_tested-2.0.2_%7C_2.0.10_%7C_2.0.11-blue)
@@ -31,7 +31,7 @@ TsGate 是一个模块化的 Java 时序数据库适配组件。它以统一 API
 
 Spring Boot 应用在 `pom.xml` 的 `<dependencies>` 中加入所选依赖即可。每个 starter 已包含对应 adapter 和公共 core。
 
-以下示例使用 **Maven Central 已发布的 2.1.0**。最新 GitHub 版本为 **2.1.2**；使用 `2.1.2` 依赖前须从该标签源码构建并安装到本地仓库。Maven Central 暂未更新。
+以下示例使用 **2.1.3**，详见 [发布状态与验证记录](https://github.com/AlanDevise/TsGate/wiki/ZH-Testing-and-Publishing)。
 
 ### InfluxDB 1.x
 
@@ -39,7 +39,7 @@ Spring Boot 应用在 `pom.xml` 的 `<dependencies>` 中加入所选依赖即可
 <dependency>
     <groupId>io.github.alandevise</groupId>
     <artifactId>tsgate-influxdb1-spring-boot-starter</artifactId>
-    <version>2.1.0</version>
+    <version>2.1.3</version>
 </dependency>
 ```
 
@@ -49,7 +49,7 @@ Spring Boot 应用在 `pom.xml` 的 `<dependencies>` 中加入所选依赖即可
 <dependency>
     <groupId>io.github.alandevise</groupId>
     <artifactId>tsgate-iotdb-spring-boot-starter</artifactId>
-    <version>2.1.0</version>
+    <version>2.1.3</version>
 </dependency>
 ```
 
@@ -135,6 +135,8 @@ Tablet RPC 编码压缩默认开启。连接不具备该协议能力的旧版 Io
 InfluxDB 3 严格复合游标分页默认使用 `tsdb.influxdb.strict-cursor-sql: or`。业务可显式选择 `union-all`，以兼容旧版查询规划器，并保留完整排序与查询限制。该策略可能增加服务端扫描开销，具体适用范围和已验证组合见中英文 Wiki 使用说明。
 
 Maven 制品采用 GitHub 身份对应的 groupId `io.github.alandevise`，Java 包为 `com.alandevise.tsgate.*`。严格游标按后端物理列身份处理并拒绝非法时间边界；四个后端均采用幂等初始化与终态关闭，IoTDB 在关闭后需创建新实例。游标键、受支持的 Map 结果类型及生命周期规则详见中英文 Wiki。
+
+**2.1.3** 校验结构化过滤条件的操作数，在批次预检前归并 IoTDB 物理表名的大小写变体，通过测试与 CI 核对后端登记，拒绝 IoTDB/InfluxDB 3 的重复结果键，并在复制输入前检查直接 adapter 批写的记录数。公共 API、主干架构、配置默认值和 Java 17 基线保持不变。升级影响与验证范围见 [2.1.3 发布说明](https://github.com/AlanDevise/TsGate/wiki/ZH-Release-Notes-2.1.3)。
 
 **2.1.2** 修复 HTTP 重定向写入误报成功，拒绝 InfluxDB 3 缺失的查询 JSON，预检聚合输出列名冲突，新增可配置的 64 MiB HTTP 整批字节预算，并缓存 POJO 读取映射计划；保留公共 API、主干架构与 Java 17 基线。行为与验证范围见 [2.1.2 发布说明](https://github.com/AlanDevise/TsGate/wiki/ZH-Release-Notes-2.1.2)。
 

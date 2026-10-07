@@ -183,7 +183,9 @@ public class OpenGeminiAdapter implements TSDBAdapter {
             if (records == null || records.isEmpty()) return delegate.batchWriteDetailed(database, records);
             List<TSDBRecord> snapshot;
             try {
+                validateBatchSize(records);
                 snapshot = List.copyOf(records);
+                validateBatchSize(snapshot);
                 for (TSDBRecord record : snapshot) {
                     validateMeasurement(record.measurement());
                     for (Object value : record.fields().values()) validateIntegerField(value);
@@ -196,6 +198,15 @@ public class OpenGeminiAdapter implements TSDBAdapter {
             }
             return delegate.batchWriteDetailed(database, snapshot);
         });
+    }
+
+    private void validateBatchSize(Collection<TSDBRecord> records) {
+        int maxBatchRecords = getMaxBatchRecords();
+        if (records.size() > maxBatchRecords) {
+            throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                    "openGemini batch write record count exceeds tsdb.opengemini.max-batch-records: "
+                            + records.size() + " > " + maxBatchRecords);
+        }
     }
 
     /**

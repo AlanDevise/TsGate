@@ -91,6 +91,10 @@ class OpenGeminiDockerIT {
     }
 
     void initialize(int rows, long bytes, long batchBytes) {
+        initialize(rows, bytes, batchBytes, 10_000);
+    }
+
+    private void initialize(int rows, long bytes, long batchBytes, int maxBatchRecords) {
         if (adapter != null) adapter.close();
         OpenGeminiProperties config = new OpenGeminiProperties();
         config.setUrl(URL);
@@ -98,6 +102,7 @@ class OpenGeminiDockerIT {
         config.setMaxQueryRows(rows);
         config.setMaxQueryResponseBytes(bytes);
         config.setMaxBatchBytes(batchBytes);
+        config.setMaxBatchRecords(maxBatchRecords);
         OpenGeminiHttpClientProperties http = new OpenGeminiHttpClientProperties();
         http.setCallTimeoutMs(15000);
         adapter = new OpenGeminiAdapter(config, http, false);
@@ -134,6 +139,81 @@ class OpenGeminiDockerIT {
     void seed() {
         assertTrue(adapter.batchWrite(null, List.of(point(base, "a", 1d), point(base + 1000, "b", 2d), point(base + 2000, "a", 3d), point(base + 3000, "b", 4d))));
         awaitVisible(List.of(point(base, "a", 1d), point(base + 1000, "b", 2d), point(base + 2000, "a", 3d), point(base + 3000, "b", 4d)));
+    }
+
+    @Test
+    void directBatchRecordLimitRejectsBeforeCopyAndPreservesReadback() {
+        initialize(10000, 16L * 1024 * 1024, 64L * 1024 * 1024, 3);
+        TSDBRecord existing = point(base, "existing", 0d);
+        assertTrue(adapter.write(null, existing));
+        awaitVisible(List.of(existing));
+        Collection<TSDBRecord> oversized = new AbstractCollection<>() {
+            @Override public int size() { return adapter.getMaxBatchRecords() + 1; }
+            @Override public Iterator<TSDBRecord> iterator() {
+                throw new AssertionError("Oversized batch must be rejected before traversal");
+            }
+        };
+        TSDBBatchWriteException failure = assertThrows(TSDBBatchWriteException.class,
+                () -> adapter.batchWriteDetailed(null, oversized));
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR, failure.getErrorCode());
+        assertEquals(BatchCommitStateEnum.NOT_COMMITTED, failure.getResult().commitState());
+        assertEquals(4, failure.getResult().requestedRecords());
+        assertEquals(0, failure.getResult().validatedRecords());
+        assertEquals(0, failure.getResult().committedRecords());
+        assertEquals(0, failure.getResult().totalBatches());
+        assertEquals(List.of(0d), adapter.query(null, detail()).getRows().stream()
+                .map(row -> ((Number) row.get("value")).doubleValue()).toList());
+        assertEquals(1, adapter.count(null, detail()));
+
+        List<TSDBRecord> boundary = List.of(point(base + 1, "next", 1d),
+                point(base + 2, "next", 2d), point(base + 3, "next", 3d));
+        assertEquals(adapter.getMaxBatchRecords(), boundary.size());
+        BatchWriteResult result = adapter.batchWriteDetailed(null, boundary);
+        assertTrue(result.isSuccess());
+        assertEquals(3, result.committedRecords());
+        List<TSDBRecord> expected = new ArrayList<>(List.of(existing));
+        expected.addAll(boundary);
+        awaitVisible(expected);
+        assertEquals(List.of(0d, 1d, 2d, 3d), adapter.query(null, detail()).getRows().stream()
+                .map(row -> ((Number) row.get("value")).doubleValue()).toList());
+        assertEquals(4, adapter.count(null, detail()));
+    }
+
+    @Test
+    void sharedFilterRulesRejectMalformedInputsAndPreserveReadback() {
+        seed();
+        List<QueryFilter> valid = List.of(
+                new QueryFilter("value", OperatorEnum.BETWEEN, List.of(2d, 3d)),
+                new QueryFilter("value", OperatorEnum.EQ, List.of(3d)),
+                new QueryFilter("value", OperatorEnum.IN, List.of(1d, 4d)));
+        List<List<Double>> expected = List.of(List.of(2d, 3d), List.of(3d), List.of(1d, 4d));
+        for (int index = 0; index < valid.size(); index++) {
+            TSDBQuery filtered = detail();
+            filtered.setFilters(List.of(valid.get(index)));
+            List<Double> values = adapter.query(null, filtered).getRows().stream()
+                    .map(row -> ((Number) row.get("value")).doubleValue()).toList();
+            assertEquals(expected.get(index), values);
+            assertEquals(expected.get(index).size(), adapter.count(null, filtered));
+        }
+        List<QueryFilter> invalid = List.of(
+                new QueryFilter("value", OperatorEnum.EQ, List.of(1d, 2d)),
+                new QueryFilter("value", OperatorEnum.BETWEEN, List.of(1d)),
+                new QueryFilter("value", OperatorEnum.BETWEEN, List.of(1d, 2d, 3d)),
+                new QueryFilter("value", OperatorEnum.IN, List.of()),
+                new QueryFilter("value", OperatorEnum.EQ, Collections.singletonList(null)),
+                new QueryFilter("value", OperatorEnum.IN, Arrays.asList(1d, null, 2d)),
+                new QueryFilter("value", OperatorEnum.GT, List.of(Double.NaN)),
+                new QueryFilter("value", OperatorEnum.LE, List.of(Double.POSITIVE_INFINITY)));
+        for (QueryFilter filter : invalid) {
+            TSDBQuery filtered = detail();
+            filtered.setFilters(List.of(filter));
+            assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                    assertThrows(TSDBException.class, () -> adapter.query(null, filtered)).getErrorCode());
+            assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                    assertThrows(TSDBException.class, () -> adapter.count(null, filtered)).getErrorCode());
+        }
+        assertEquals(4, adapter.query(null, detail()).getRowCount());
+        assertEquals(4, adapter.count(null, detail()));
     }
 
     @Test
