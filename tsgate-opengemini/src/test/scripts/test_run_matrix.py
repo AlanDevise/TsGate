@@ -19,6 +19,9 @@ SPEC.loader.exec_module(matrix)
 
 class MatrixRunnerTest(unittest.TestCase):
     def setUp(self):
+        environment = patch.dict(os.environ, {"GITHUB_SHA": ""})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
@@ -250,6 +253,57 @@ class MatrixRunnerTest(unittest.TestCase):
                 patch.object(matrix, "run_environment", return_value=failed) as run:
             self.assertEqual(1, matrix.main(["--output", str(self.root / "failed")]))
         self.assertEqual(1, run.call_count)
+
+
+    def test_mode_selector_defaults_to_four_and_selects_both_versions_for_each_mode(self):
+        self.assertEqual(matrix.MATRIX, matrix.selected_matrix())
+        for mode in ("single", "cluster"):
+            self.assertEqual((("1.4.1", mode), ("1.5.2", mode)), matrix.selected_matrix(mode))
+        with self.assertRaises(ValueError):
+            matrix.selected_matrix("unknown")
+
+    def test_single_mode_keeps_unselected_cluster_evidence_as_not_run(self):
+        fixture = self.root / "environment.py"
+        fixture.touch()
+        visited = []
+
+        def environment(args, output, version, mode, manifest):
+            visited.append((version, mode))
+            return dict(version=version, mode=mode, status="passed", interrupted=False,
+                        cleanup={"status": "passed"}, failsafe={"totals": dict(tests=27, failures=0, errors=0, skipped=0)})
+
+        output = self.root / "single"
+        with patch.object(matrix, "ENVIRONMENT", fixture), patch.object(matrix, "toolchain", return_value={}),                 patch.object(matrix, "capture", return_value="Docker test version"),                 patch.object(matrix, "git_commit", return_value="a" * 40),                 patch.object(matrix, "source_manifest", return_value={"pom.xml": "digest"}),                 patch.object(matrix, "run_environment", side_effect=environment):
+            self.assertEqual(0, matrix.main(["--mode", "single", "--output", str(output)]))
+        self.assertEqual([("1.4.1", "single"), ("1.5.2", "single")], visited)
+        summary = json.loads((output / "summary.json").read_text())
+        self.assertEqual(4, len(summary["environments"]))
+        self.assertEqual(2, len(summary["selected"]))
+        self.assertEqual(54, summary["failsafeTotals"]["tests"])
+        self.assertTrue(summary["gitCommitUnchanged"])
+        for result in summary["environments"]:
+            self.assertEqual(result["mode"] == "single", result["selected"])
+            self.assertEqual("passed" if result["selected"] else "not-run", result["status"])
+
+    def test_github_commit_mismatch_fails_before_starting_environments(self):
+        fixture = self.root / "environment.py"
+        fixture.touch()
+        output = self.root / "wrong-commit"
+        with patch.object(matrix, "ENVIRONMENT", fixture), patch.object(matrix, "toolchain", return_value={}),                 patch.object(matrix, "capture", return_value="Docker test version"),                 patch.object(matrix, "git_commit", return_value="a" * 40),                 patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}),                 patch.object(matrix, "run_environment") as run:
+            self.assertEqual(1, matrix.main(["--output", str(output)]))
+        run.assert_not_called()
+        self.assertIn("GITHUB_SHA", json.loads((output / "summary.json").read_text())["error"])
+
+    def test_git_checkout_change_stops_remaining_environments(self):
+        fixture = self.root / "environment.py"
+        fixture.touch()
+        output = self.root / "changed-commit"
+        with patch.object(matrix, "ENVIRONMENT", fixture), patch.object(matrix, "toolchain", return_value={}),                 patch.object(matrix, "capture", return_value="Docker test version"),                 patch.object(matrix, "git_commit", side_effect=["a" * 40, "b" * 40, "b" * 40]),                 patch.object(matrix, "source_manifest", return_value={}),                 patch.object(matrix, "run_environment") as run:
+            self.assertEqual(1, matrix.main(["--output", str(output)]))
+        run.assert_not_called()
+        summary = json.loads((output / "summary.json").read_text())
+        self.assertFalse(summary["gitCommitUnchanged"])
+        self.assertTrue(all(result["status"] == "not-run" for result in summary["environments"]))
 
 
 if __name__ == "__main__":

@@ -20,6 +20,29 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[4]
 SERVERS = Path(__file__).resolve().parent.parent / "resources/ci/docker-servers.json"
+BACKEND_TESTS = {
+    "iotdb": "IoTDB*DockerIT,TabletCompressionDockerIT,AllStartersIoTDBDockerIT",
+    "influxdb1": "InfluxDB1*DockerIT",
+    "influxdb": "InfluxDBDockerIT,InfluxDBStarterDockerIT,StrictCursorUnionDockerIT,FluentCaseDistinctCursorDockerIT,AllStartersInfluxDBDockerIT",
+}
+
+
+def git_commit():
+    return capture(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip()
+
+
+def backend_selection(servers, backend=None):
+    """Default to all servers; explicit selectors never expand the selected database set."""
+    selected = [dict(server) for server in servers if backend is None or server["kind"] == backend]
+    if not selected or backend is not None and backend not in BACKEND_TESTS:
+        raise ValueError("No configured representative server for backend: " + str(backend))
+    return selected
+
+
+def backend_parameters(backend=None):
+    if backend is None:
+        return []
+    return ["-Dit.test=" + BACKEND_TESTS[backend], "-Dfailsafe.failIfNoSpecifiedTests=false"]
 
 
 def capture(command, timeout=45):
@@ -177,20 +200,26 @@ def opengemini_options(url=None, version=None, urls=None, replicas=None):
     return parameters, metadata
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("unit", "docker"))
     parser.add_argument("--spring-boot", default="2.7.18")
     parser.add_argument("--maven-repo", type=Path)
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--release-artifacts", action="store_true")
+    parser.add_argument("--backend", choices=tuple(BACKEND_TESTS), help="Select one representative Docker backend; default runs all three")
     parser.add_argument("--pull", choices=("missing", "never", "always"), default="missing")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--opengemini-url", help="Use an existing openGemini HTTP endpoint in Docker mode")
     parser.add_argument("--opengemini-version", help="Expected version of the external openGemini deployment")
     parser.add_argument("--opengemini-urls", help="Comma-separated HTTP endpoints of the same openGemini deployment")
     parser.add_argument("--opengemini-replicas", type=int, help="Replication count for databases created by openGemini tests")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.backend is not None and args.mode != "docker":
+        parser.error("--backend applies only to Docker mode")
+    if args.backend is not None and any(value is not None for value in
+                                        (args.opengemini_url, args.opengemini_version, args.opengemini_urls, args.opengemini_replicas)):
+        parser.error("--backend cannot be combined with external openGemini options")
     if args.mode != "docker" and any(value is not None for value in
                                       (args.opengemini_url, args.opengemini_version, args.opengemini_urls, args.opengemini_replicas)):
         parser.error("openGemini endpoint options apply only to Docker mode")
@@ -203,11 +232,16 @@ def main():
     output = args.output or ROOT / ".local-test/ci" / (args.mode + "-" + suffix)
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=False)
-    summary = dict(mode=args.mode, springBoot=args.spring_boot, status="failed", servers=[], cleanup=[])
+    summary = dict(mode=args.mode, springBoot=args.spring_boot, status="failed", servers=[], cleanup=[],
+                   backends={kind: dict(selected=args.mode == "docker" and args.backend in (None, kind),
+                                        status="not-run") for kind in BACKEND_TESTS})
     created = []
     try:
         summary["java"] = capture(["java", "-version"])
         summary["maven"] = capture(["mvn", "-version"])
+        summary["gitCommit"] = git_commit()
+        if os.environ.get("GITHUB_SHA") and summary["gitCommit"] != os.environ["GITHUB_SHA"]:
+            raise RuntimeError("Checkout commit does not match GITHUB_SHA")
         summary["sourceManifest"] = source_manifest()
         command = ["mvn", "-B", "--no-transfer-progress", "-Dstyle.color=never",
                    "-Dspring-boot.version=" + args.spring_boot]
@@ -220,7 +254,8 @@ def main():
             summary["opengemini"] = external_metadata
             command += external_parameters
             capture(["docker", "info", "--format", "{{.ServerVersion}}"])
-            summary["servers"] = json.loads(SERVERS.read_text())
+            summary["servers"] = backend_selection(json.loads(SERVERS.read_text()), args.backend)
+            command += backend_parameters(args.backend)
             for server in summary["servers"]:
                 start_server(server, created, args.pull, suffix)
             for server in summary["servers"]:
@@ -235,6 +270,8 @@ def main():
         if profiles:
             command += ["-P" + ",".join(profiles)]
         command += ["clean", "verify"]
+        if source_manifest() != summary["sourceManifest"] or git_commit() != summary["gitCommit"]:
+            raise RuntimeError("Build inputs or Git commit changed before Maven")
         summary["command"] = command
         summary["mavenExit"] = logged(command, output / "maven.log")
         for report_type in (["surefire", "failsafe"] if args.mode == "docker" else ["surefire"]):
@@ -256,6 +293,16 @@ def main():
         summary["error"] = str(error)
         print("FAILED:", error, file=sys.stderr, flush=True)
     finally:
+        if "sourceManifest" in summary:
+            try:
+                summary["sourceManifestUnchanged"] = source_manifest() == summary["sourceManifest"]
+                summary["gitCommitUnchanged"] = git_commit() == summary["gitCommit"]
+                if not summary["sourceManifestUnchanged"] or not summary["gitCommitUnchanged"]:
+                    summary["status"] = "failed"
+                    summary["error"] = "Build inputs or Git commit changed during validation"
+            except Exception as error:
+                summary["status"] = "failed"
+                summary["error"] = "Cannot verify final source identity: " + str(error)
         for server in reversed(created):
             try:
                 logs = capture(["docker", "logs", "--tail", "1000", server["name"]])
@@ -268,6 +315,9 @@ def main():
             except subprocess.SubprocessError as error:
                 summary["cleanup"].append(dict(name=server["name"], removed=False, error=str(error)))
                 summary["status"] = "failed"
+        for backend in summary["backends"].values():
+            if backend["selected"]:
+                backend["status"] = summary["status"]
         summary["finishedAt"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
         print("RESULT:", summary["status"], "in", output, flush=True)

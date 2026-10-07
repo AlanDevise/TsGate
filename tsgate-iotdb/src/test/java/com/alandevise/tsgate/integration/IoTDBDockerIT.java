@@ -36,6 +36,42 @@ class IoTDBDockerIT extends DatabaseContractIT {
         var result=adapter.batchWriteDetailed(null,java.util.stream.IntStream.range(0,7).mapToObj(i->record(BASE+i,"a",i)).toList());
         assertEquals(3,result.totalBatches()); assertEquals(7,result.committedRecords());
     }
+    @Test void mixedCaseColumnsRoundTripWithinOneTablet() {
+        adapter.close();
+        IoTDBProperties config = config(db);
+        config.getTable().setTabletMaxRowSize(20);
+        adapter = new IoTDBTableAdapter(config, config.getPool(), false);
+        adapter.init();
+        template = new TGTemplate(adapter);
+        String[] tagNames = {"DEVICE", "device", "DeViCe"};
+        String[] valueNames = {"value", "VALUE", "VaLuE"};
+        String[] integerNames = {"IVAL", "Ival", "ival"};
+        List<TSDBRecord> records = new ArrayList<>();
+        for (int row = 0; row < 12; row++) {
+            Map<String, Object> fields = new LinkedHashMap<>();
+            fields.put(valueNames[row % 3], row + 0.25d);
+            fields.put(integerNames[row % 3], row % 3 == 0 ? null : row);
+            fields.put(row % 2 == 0 ? "LABEL" : "label", "row-" + row);
+            records.add(new TSDBRecord("telemetry", BASE + row,
+                    Map.of(tagNames[row % 3], "sensor-" + row), fields));
+        }
+        BatchWriteResult result = adapter.batchWriteDetailed(null, records);
+        assertTrue(result.isSuccess());
+        assertEquals(12, result.committedRecords());
+        assertEquals(1, result.committedBatches());
+        List<Map<String, Object>> readback = rows(query());
+        assertEquals(12, readback.size());
+        for (int row = 0; row < readback.size(); row++) {
+            Map<String, Object> actual = readback.get(row);
+            assertEquals(BASE + row, ((Number) actual.get("time")).longValue());
+            assertEquals("sensor-" + row, actual.get("device"));
+            assertEquals(row + 0.25d, actual.get("value"));
+            assertEquals(row % 3 == 0 ? null : row, actual.get("ival"));
+            assertEquals("row-" + row, actual.get("label"));
+            assertTrue(records.get(row).tags().containsKey(tagNames[row % 3]));
+            assertTrue(records.get(row).fields().containsKey(valueNames[row % 3]));
+        }
+    }
     @Test void explicitDatabaseDoesNotLeakIntoDefaultSession() throws Exception {
         String other=db+"_other"; admin.executeNonQueryStatement("CREATE DATABASE "+other);
         try {

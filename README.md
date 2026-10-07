@@ -2,7 +2,7 @@
 
 <p align="center"><img src="assets/tsgate-logo.png" alt="TsGate logo" width="640"></p>
 
-![Version](https://img.shields.io/badge/version-2.1.0-blue)
+![Version](https://img.shields.io/badge/version-2.1.1-blue)
 ![Java](https://img.shields.io/badge/Java-17%2B-orange)
 ![Spring Boot tested](https://img.shields.io/badge/Boot_tested-2.7.18_%7C_3.5.14_%7C_4.1.0-green)
 ![IoTDB tested](https://img.shields.io/badge/IoTDB_tested-2.0.2_%7C_2.0.10_%7C_2.0.11-blue)
@@ -30,6 +30,8 @@ Applications can integrate an adapter directly or use its Spring Boot starter. E
 ## Maven dependencies
 
 For Spring Boot applications, add the chosen dependency inside `<dependencies>` in `pom.xml`. Each starter includes its adapter and the shared core.
+
+These examples use **2.1.0, published to Maven Central**. The latest GitHub release is **2.1.1**; install that tag from source before using `2.1.1` dependencies. Maven Central has not been updated.
 
 ### InfluxDB 1.x
 
@@ -133,6 +135,8 @@ Tablet RPC encoding/compression is enabled by default. For older IoTDB servers w
 InfluxDB 3 strict composite cursor pagination defaults to `tsdb.influxdb.strict-cursor-sql: or`. An explicit `union-all` strategy accommodates older query planners while preserving complete ordering and query limits. It may increase server-side scanning; the bilingual Wiki guides explain its scope and verified combinations.
 
 Maven artifacts use the GitHub-identity groupId `io.github.alandevise` and Java packages use `com.alandevise.tsgate.*`. Strict cursors preserve backend column identity and reject invalid time boundaries. All adapters have idempotent initialization and terminal closure; IoTDB applications must create a new instance after close. The bilingual Wiki documents cursor keys, supported Map result types and lifecycle rules.
+
+Version **2.1.1** adds exact cursor-time validation, IoTDB column-identity preflight, reusable backend contract tests and automatic Docker CI. The public API and Java 17 baseline are retained. See the [2.1.1 release notes](https://github.com/AlanDevise/TsGate/wiki/EN-Release-Notes-2.1.1) for behavior and validation scope.
 
 See the [2.1.0 release notes](https://github.com/AlanDevise/TsGate/wiki/EN-Release-Notes-2.1.0).
 

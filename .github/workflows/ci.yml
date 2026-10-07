@@ -3,15 +3,11 @@ name: CI
 on:
   push:
     branches: [main, 'codex/**']
+    tags: ['v*']
     paths: ['pom.xml', 'tsgate-*/**', 'scripts/verify-release-artifacts.py', 'LICENSE', 'NOTICE', '.github/workflows/ci.yml']
   pull_request:
     paths: ['pom.xml', 'tsgate-*/**', 'scripts/verify-release-artifacts.py', 'LICENSE', 'NOTICE', '.github/workflows/ci.yml']
   workflow_dispatch:
-    inputs:
-      run_docker:
-        description: Run the representative IoTDB and InfluxDB Docker suite; openGemini uses a separate deployment matrix
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -21,10 +17,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Select database coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      docker: ${{ steps.scope.outputs.docker }}
+      opengemini: ${{ steps.scope.outputs.opengemini }}
+      full: ${{ steps.scope.outputs.full }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: scope
+        name: Compute coverage from event data and Git diff
+        run: >-
+          python3 tsgate-core/src/test/scripts/ci-scope.py
+          --event-file "$GITHUB_EVENT_PATH" --event-name "$GITHUB_EVENT_NAME"
+          --sha "$GITHUB_SHA" --ref "$GITHUB_REF" --output "$GITHUB_OUTPUT"
+          --json .local-test/ci/scope.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: database-ci-scope
+          path: .local-test/ci/scope.json
+          include-hidden-files: true
+          retention-days: 7
+
   unit:
     name: Temurin ${{ matrix.java }} / Spring Boot ${{ matrix.boot }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    outputs:
+      commit: ${{ steps.source.outputs.sha }}
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +67,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - id: source
+        name: Record tested checkout
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
@@ -75,27 +105,165 @@ jobs:
           if-no-files-found: warn
 
   docker:
-    name: Representative IoTDB and InfluxDB Docker integration tests
-    if: github.event_name == 'workflow_dispatch' && inputs.run_docker
+    name: Docker / ${{ matrix.backend }}
+    needs: changes
+    if: needs.changes.outputs.docker != '[]'
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 40
+    outputs:
+      commit: ${{ steps.source.outputs.sha }}
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: ${{ fromJSON(needs.changes.outputs.docker) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - id: source
+        name: Record tested checkout
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: '17.0.14'
           cache: maven
-      - name: Run unit tests and Docker regression tests
-        run: python3 tsgate-core/src/test/scripts/run-tests.py docker --spring-boot 2.7.18
+      - id: images
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: .local-test/image-cache/${{ matrix.backend }}.tar
+          key: database-${{ runner.os }}-${{ runner.arch }}-${{ matrix.backend }}-${{ hashFiles('tsgate-core/src/test/resources/ci/docker-servers.json') }}
+      - name: Restore exact-version database image
+        if: steps.images.outputs.cache-hit == 'true'
+        env:
+          BACKEND: ${{ matrix.backend }}
+        run: docker image load --input ".local-test/image-cache/$BACKEND.tar"
+      - name: Run unit tests and selected Docker read/write regression
+        env:
+          BACKEND: ${{ matrix.backend }}
+        run: >-
+          python3 tsgate-core/src/test/scripts/run-tests.py docker
+          --spring-boot 2.7.18 --backend "$BACKEND"
+          --output .local-test/ci/docker
+      - name: Retain exact-version database image
+        if: steps.images.outputs.cache-hit != 'true'
+        env:
+          BACKEND: ${{ matrix.backend }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, pathlib, subprocess
+          servers = json.loads(pathlib.Path('tsgate-core/src/test/resources/ci/docker-servers.json').read_text())
+          image = next(server['image'] for server in servers if server['kind'] == os.environ['BACKEND'])
+          destination = pathlib.Path('.local-test/image-cache') / (os.environ['BACKEND'] + '.tar')
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          subprocess.run(['docker', 'image', 'save', '--output', str(destination), image], check=True, timeout=180)
+          PYTHON
       - name: Test and database reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: docker-jdk-17-boot-2.7.18
+          name: docker-${{ matrix.backend }}-jdk-17-boot-2.7.18
           path: .local-test/ci/
           include-hidden-files: true
           retention-days: 7
           if-no-files-found: warn
+
+  opengemini:
+    name: Docker / openGemini 1.4.1 and 1.5.2
+    needs: changes
+    if: needs.changes.outputs.opengemini == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    outputs:
+      commit: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: source
+        name: Record tested checkout
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17.0.14'
+          cache: maven
+      - id: images
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: .local-test/image-cache/opengemini.tar
+          key: opengemini-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tsgate-opengemini/src/test/docker/**') }}
+      - name: Restore provenance-checked fixture images
+        if: steps.images.outputs.cache-hit == 'true'
+        run: docker image load --input .local-test/image-cache/opengemini.tar
+      - name: Run both openGemini versions with selected deployment coverage
+        env:
+          FULL_MATRIX: ${{ needs.changes.outputs.full }}
+        run: |
+          python3 - <<'PYTHON'
+          import os, subprocess, sys
+          command = [sys.executable, 'tsgate-opengemini/src/test/scripts/run-matrix.py',
+                     '--output', '.local-test/ci/opengemini', '--spring-boot', '2.7.18']
+          if os.environ['FULL_MATRIX'] != 'true':
+              command += ['--mode', 'single']
+          subprocess.run(command, check=True)
+          PYTHON
+      - name: Retain provenance-checked fixture images
+        if: steps.images.outputs.cache-hit != 'true'
+        run: |
+          python3 - <<'PYTHON'
+          import importlib.util, pathlib, subprocess
+          fixture = pathlib.Path('tsgate-opengemini/src/test/docker/environment.py')
+          spec = importlib.util.spec_from_file_location('fixture', fixture)
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          destination = pathlib.Path('.local-test/image-cache/opengemini.tar')
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          subprocess.run(['docker', 'image', 'save', '--output', str(destination),
+                          *[module.image_for(version) for version in module.VERSIONS]], check=True, timeout=180)
+          PYTHON
+      - name: Deployment, read/write, provenance and cleanup reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: opengemini-jdk-17-boot-2.7.18
+          path: .local-test/ci/
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: warn
+
+  release-gate:
+    name: Source and database verification gate
+    needs: [changes, unit, docker, opengemini]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require selected checks to pass on the same commit
+        env:
+          CHECKS: ${{ toJSON(needs) }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os
+          checks = json.loads(os.environ['CHECKS'])
+          for name in ('changes', 'unit'):
+              if checks[name]['result'] != 'success':
+                  raise SystemExit(name + ' did not pass')
+          scope = checks['changes']['outputs']
+          selected = {'unit': True, 'docker': bool(json.loads(scope['docker'])),
+                      'opengemini': json.loads(scope['opengemini'])}
+          if json.loads(scope['full']) and not all(selected.values()):
+              raise SystemExit('Full validation must select all database jobs')
+          for name, required in selected.items():
+              job = checks[name]
+              if job['result'] != ('success' if required else 'skipped'):
+                  raise SystemExit(name + ' did not complete its selected coverage')
+              if required and job['outputs'].get('commit') != os.environ['EXPECTED_SHA']:
+                  raise SystemExit(name + ' tested a different checkout commit')
+          print('All selected checks passed on ' + os.environ['EXPECTED_SHA'])
+          PYTHON

@@ -33,6 +33,16 @@ LABEL = "com.alandevise.tsgate.opengemini.fixture"
 COUNTERS = ("tests", "failures", "errors", "skipped")
 
 
+def selected_matrix(mode=None):
+    if mode not in (None, "single", "cluster"):
+        raise ValueError("Unknown openGemini deployment mode: " + str(mode))
+    return tuple(entry for entry in MATRIX if mode is None or entry[1] == mode)
+
+
+def git_commit():
+    return capture(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip()
+
+
 def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -322,6 +332,7 @@ def positive_timeout(value):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, help="New directory for all logs, states, reports and summary.json")
+    parser.add_argument("--mode", choices=("single", "cluster"), help="Select both versions in one deployment mode; default runs all four combinations")
     parser.add_argument("--spring-boot", default="2.7.18")
     parser.add_argument("--maven-repo", type=Path)
     parser.add_argument("--offline", action="store_true")
@@ -332,16 +343,28 @@ def main(argv=None):
     args = parser.parse_args(argv)
     output = (args.output or ROOT / ".local-test/opengemini-matrix" / uuid.uuid4().hex[:10]).resolve()
     output.mkdir(parents=True, exist_ok=False)
+    selected = selected_matrix(args.mode)
     summary = dict(status="failed", startedAt=now(), springBoot=args.spring_boot, output=str(output),
-                   environments=[dict(version=version, mode=mode, status="not-run") for version, mode in MATRIX])
+                   selected=[dict(version=version, mode=mode) for version, mode in selected],
+                   environments=[dict(version=version, mode=mode, selected=(version, mode) in selected,
+                                      status="not-run") for version, mode in MATRIX])
     try:
         if not ENVIRONMENT.is_file():
             raise RuntimeError("Missing environment fixture: " + str(ENVIRONMENT))
         summary["toolchain"] = toolchain()
         summary["dockerVersion"] = capture(["docker", "info", "--format", "{{.ServerVersion}}"])
+        summary["gitCommit"] = git_commit()
+        if os.environ.get("GITHUB_SHA") and summary["gitCommit"] != os.environ["GITHUB_SHA"]:
+            raise RuntimeError("Checkout commit does not match GITHUB_SHA")
         summary["sourceManifest"] = source_manifest()
         for index, (version, mode) in enumerate(MATRIX):
+            if (version, mode) not in selected:
+                continue
+            if git_commit() != summary["gitCommit"]:
+                raise RuntimeError("Git commit changed; remaining matrix environments were not run")
             result = run_environment(args, output / (version + "-" + mode), version, mode, summary["sourceManifest"])
+            result["selected"] = True
+            result["gitCommit"] = summary["gitCommit"]
             summary["environments"][index] = result
             if result["interrupted"]:
                 raise KeyboardInterrupt()
@@ -349,7 +372,8 @@ def main(argv=None):
                 raise RuntimeError("Cleanup failed; no further environments were created")
             if source_manifest() != summary["sourceManifest"]:
                 raise RuntimeError("Build inputs changed; remaining matrix environments were not run")
-        if all(environment["status"] == "passed" for environment in summary["environments"]):
+        if all(environment["status"] == "passed" for environment in summary["environments"]
+               if environment["selected"]):
             summary["status"] = "passed"
         else:
             summary["error"] = "One or more matrix environments failed; see individual summaries"
@@ -360,9 +384,15 @@ def main(argv=None):
         summary["failsafeTotals"] = {key: sum(environment.get("failsafe", {}).get("totals", {}).get(key, 0)
                                              for environment in summary["environments"]) for key in COUNTERS}
         if "sourceManifest" in summary:
-            summary["sourceManifestUnchanged"] = source_manifest() == summary["sourceManifest"]
-            if not summary["sourceManifestUnchanged"]:
+            try:
+                summary["sourceManifestUnchanged"] = source_manifest() == summary["sourceManifest"]
+                summary["gitCommitUnchanged"] = git_commit() == summary["gitCommit"]
+                if not summary["sourceManifestUnchanged"] or not summary["gitCommitUnchanged"]:
+                    summary["status"] = "failed"
+                    summary["error"] = "Build inputs or Git commit changed during matrix validation"
+            except Exception as error:
                 summary["status"] = "failed"
+                summary["error"] = "Cannot verify final source identity: " + str(error)
         summary["finishedAt"] = now()
         (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
         print("RESULT:", summary["status"], "in", output, flush=True)

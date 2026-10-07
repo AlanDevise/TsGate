@@ -500,8 +500,7 @@ public class IoTDBTableAdapter implements TSDBAdapter {
             }
             validateRecord(tsdbRecord);
             TableBatch batch = batches.computeIfAbsent(tsdbRecord.measurement(), TableBatch::new);
-            batch.records.add(tsdbRecord);
-            batch.addColumns(tsdbRecord);
+            batch.addRecord(tsdbRecord);
         }
         for (TableBatch batch : batches.values()) {
             batch.finishColumnTypes();
@@ -515,9 +514,9 @@ public class IoTDBTableAdapter implements TSDBAdapter {
      */
     private void validatePreparedBatches(Map<String, TableBatch> batches) {
         for (TableBatch batch : batches.values()) {
-            for (TSDBRecord tsdbRecord : batch.records) {
+            for (PreparedRecord record : batch.records) {
                 for (TableColumn column : batch.columns.values()) {
-                    Object value = getColumnValue(tsdbRecord, column);
+                    Object value = getColumnValue(record, column);
                     if (value != null) {
                         normalizeValue(value, column.type);
                     }
@@ -562,15 +561,15 @@ public class IoTDBTableAdapter implements TSDBAdapter {
 
         Tablet tablet = new Tablet(batch.tableName, columnNames, dataTypes, categories, tabletMaxRowSize);
         int rowIndex = 0;
-        for (TSDBRecord tsdbRecord : batch.records) {
+        for (PreparedRecord record : batch.records) {
             if (rowIndex >= tablet.getMaxRowNumber()) {
                 insertTablet(tableSession, batch.tableName, tablet, rowIndex, progress);
                 tablet.reset();
                 rowIndex = 0;
             }
-            tablet.addTimestamp(rowIndex, tsdbRecord.timestamp());
+            tablet.addTimestamp(rowIndex, record.timestamp());
             for (TableColumn column : batch.columns.values()) {
-                Object value = getColumnValue(tsdbRecord, column);
+                Object value = getColumnValue(record, column);
                 if (value != null) {
                     tablet.addValue(column.name, rowIndex, normalizeValue(value, column.type));
                 }
@@ -1759,19 +1758,16 @@ public class IoTDBTableAdapter implements TSDBAdapter {
     }
 
     /**
-     * Read a tag or field value according to the column's role.
-     * @param tsdbRecord shared record; for example {@code device_code=D001}
+     * Read a value from the prepared row using its canonical physical column identity.
+     * @param record prepared row with canonical column keys
      * @param column table-column definition; for example {@code new TableColumn("device_code", ColumnCategory.TAG, TSDataType.STRING)}
      * @return column value
      * @author Alan Zhang [initiator@alandevise.com]
      * @since 2026-07-02
      */
-    private Object getColumnValue(TSDBRecord tsdbRecord,
+    private Object getColumnValue(PreparedRecord record,
                                   TableColumn column) {
-        if (column.category == ColumnCategory.TAG) {
-            return tsdbRecord.tags().get(column.name);
-        }
-        return tsdbRecord.fields().get(column.name);
+        return record.values().get(column.name);
     }
 
     /**
@@ -1938,9 +1934,9 @@ public class IoTDBTableAdapter implements TSDBAdapter {
          */
         private final Map<String, TableColumn> columns = new LinkedHashMap<>();
         /**
-         * Snapshot of records for the current measurement, avoiding another scan of the complete input during writing.
+         * Prepared rows for the current measurement, keyed by canonical physical column identity.
          */
-        private final List<TSDBRecord> records = new ArrayList<>();
+        private final List<PreparedRecord> records = new ArrayList<>();
 
         /**
          * Create a batch context for the specified table.
@@ -1953,18 +1949,40 @@ public class IoTDBTableAdapter implements TSDBAdapter {
         }
 
         /**
-         * Collect tag and field column definitions from a record.
+         * Snapshot a row's values and collect column definitions using IoTDB's lowercase column identity.
+         * Case variants within one row are ambiguous and must fail before any session is borrowed.
          * @param tsdbRecord shared record; for example {@code new TSDBRecord("ACCRUE", 1783000000000L, tags, fields)}
          * @author Alan Zhang [initiator@alandevise.com]
          * @since 2026-07-02
          */
-        private void addColumns(TSDBRecord tsdbRecord) {
-            for (String name : tsdbRecord.tags().keySet()) {
+        private void addRecord(TSDBRecord tsdbRecord) {
+            Map<String, Object> values = new LinkedHashMap<>();
+            for (Map.Entry<String, String> entry : tsdbRecord.tags().entrySet()) {
+                String name = addValue(values, entry.getKey(), entry.getValue());
                 addColumn(name, ColumnCategory.TAG, TSDataType.STRING);
             }
             for (Map.Entry<String, Object> entry : tsdbRecord.fields().entrySet()) {
-                addColumn(entry.getKey(), ColumnCategory.FIELD, inferDataType(entry.getValue()));
+                String name = addValue(values, entry.getKey(), entry.getValue());
+                addColumn(name, ColumnCategory.FIELD, inferDataType(entry.getValue()));
             }
+            records.add(new PreparedRecord(tsdbRecord.timestamp(), values));
+        }
+
+        /**
+         * Add one value without mutating the caller's maps or dropping duplicate/null entries.
+         * @param values prepared row values
+         * @param originalName original tag or field name
+         * @param value tag or field value
+         * @return canonical physical column name
+         */
+        private String addValue(Map<String, Object> values, String originalName, Object value) {
+            String name = canonicalColumn(originalName);
+            if (values.containsKey(name)) {
+                throw new TSDBException(TSDBErrorCodeEnum.METADATA_ERROR,
+                        "Duplicate IoTDB physical column in one record: " + originalName);
+            }
+            values.put(name, value);
+            return name;
         }
 
         /**
@@ -2087,6 +2105,12 @@ public class IoTDBTableAdapter implements TSDBAdapter {
         private Integer failedBatchIndex() {
             return writeAttempted ? committedBatches : null;
         }
+    }
+
+    /**
+     * Private row snapshot whose values use the same canonical keys as the table's column definitions.
+     */
+    private record PreparedRecord(long timestamp, Map<String, Object> values) {
     }
 
     /**

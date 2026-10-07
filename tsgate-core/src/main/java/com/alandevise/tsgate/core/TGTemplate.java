@@ -18,6 +18,8 @@ import com.alandevise.tsgate.model.SortOrderEnum;
 import com.alandevise.tsgate.model.SortSpec;
 import lombok.extern.slf4j.Slf4j;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.*;
@@ -381,6 +383,10 @@ public class TGTemplate {
         boolean hasNext = pageRows.size() < safeRows(raw.getRows()).size();
         Long nextCursorTime = hasNext && !pageRows.isEmpty()
                 ? extractTime(pageRows.get(pageRows.size() - 1), pageQuery.getTimeColumn()) : null;
+        if (hasNext && nextCursorTime == null) {
+            throw new TSDBException(TSDBErrorCodeEnum.QUERY_ERROR,
+                    "Cannot extract a usable time cursor from query result: " + pageQuery.getTimeColumn());
+        }
         return new PageResult<>(mapRows(resultType, pageRows), nextCursorTime, hasNext,
                 requestedLimit, SortOrderEnum.normalize(pageQuery.getOrder()));
     }
@@ -921,6 +927,8 @@ public class TGTemplate {
 
     /**
      * Converts common time representations into epoch milliseconds.
+     * Numeric values must be finite, integral, and within the signed-long range.
+     * Instant and ISO values retain their existing millisecond resolution.
      *
      * @param value time value, for example {@code 1783000000000L}, {@code Instant.now()}, or {@code "2026-07-03T00:00:00Z"}
      * @return epoch milliseconds, or null when parsing fails
@@ -928,25 +936,35 @@ public class TGTemplate {
      * @since 2026-07-03
      */
     private static Long toEpochMillis(Object value) {
-        if (value instanceof Number) {
-            return ((Number) value).longValue();
-        }
-        if (value instanceof Instant) {
-            return ((Instant) value).toEpochMilli();
-        }
-        if (value instanceof Date) {
-            return ((Date) value).getTime();
-        }
-        if (value instanceof CharSequence) {
-            String text = value.toString().trim();
-            if (text.isEmpty()) {
-                return null;
+        try {
+            if (value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long) {
+                return ((Number) value).longValue();
             }
-            try {
-                return Instant.parse(text).toEpochMilli();
-            } catch (DateTimeParseException ignored) {
-                return null;
+            if (value instanceof BigInteger) {
+                return ((BigInteger) value).longValueExact();
             }
+            if (value instanceof BigDecimal) {
+                return ((BigDecimal) value).longValueExact();
+            }
+            if (value instanceof Float || value instanceof Double) {
+                // Preserve the actual binary value, including exactly representable Long.MIN_VALUE.
+                return new BigDecimal(((Number) value).doubleValue()).longValueExact();
+            }
+            if (value instanceof Number) {
+                return new BigDecimal(value.toString()).longValueExact();
+            }
+            if (value instanceof Instant) {
+                return ((Instant) value).toEpochMilli();
+            }
+            if (value instanceof Date) {
+                return ((Date) value).getTime();
+            }
+            if (value instanceof CharSequence) {
+                String text = value.toString().trim();
+                return text.isEmpty() ? null : Instant.parse(text).toEpochMilli();
+            }
+        } catch (ArithmeticException | NumberFormatException | DateTimeParseException ignored) {
+            return null;
         }
         return null;
     }

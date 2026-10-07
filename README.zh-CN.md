@@ -2,7 +2,7 @@
 
 <p align="center"><img src="assets/tsgate-logo.png" alt="TsGate logo" width="640"></p>
 
-![Version](https://img.shields.io/badge/version-2.1.0-blue)
+![Version](https://img.shields.io/badge/version-2.1.1-blue)
 ![Java](https://img.shields.io/badge/Java-17%2B-orange)
 ![Spring Boot tested](https://img.shields.io/badge/Boot_tested-2.7.18_%7C_3.5.14_%7C_4.1.0-green)
 ![IoTDB tested](https://img.shields.io/badge/IoTDB_tested-2.0.2_%7C_2.0.10_%7C_2.0.11-blue)
@@ -30,6 +30,8 @@ TsGate 是一个模块化的 Java 时序数据库适配组件。它以统一 API
 ## Maven 依赖
 
 Spring Boot 应用在 `pom.xml` 的 `<dependencies>` 中加入所选依赖即可。每个 starter 已包含对应 adapter 和公共 core。
+
+以下示例使用 **Maven Central 已发布的 2.1.0**。最新 GitHub 版本为 **2.1.1**；使用 `2.1.1` 依赖前须从该标签源码构建并安装到本地仓库。Maven Central 暂未更新。
 
 ### InfluxDB 1.x
 
@@ -133,6 +135,8 @@ Tablet RPC 编码压缩默认开启。连接不具备该协议能力的旧版 Io
 InfluxDB 3 严格复合游标分页默认使用 `tsdb.influxdb.strict-cursor-sql: or`。业务可显式选择 `union-all`，以兼容旧版查询规划器，并保留完整排序与查询限制。该策略可能增加服务端扫描开销，具体适用范围和已验证组合见中英文 Wiki 使用说明。
 
 Maven 制品采用 GitHub 身份对应的 groupId `io.github.alandevise`，Java 包为 `com.alandevise.tsgate.*`。严格游标按后端物理列身份处理并拒绝非法时间边界；四个后端均采用幂等初始化与终态关闭，IoTDB 在关闭后需创建新实例。游标键、受支持的 Map 结果类型及生命周期规则详见中英文 Wiki。
+
+**2.1.1** 新增精确游标时间校验、IoTDB 列身份预检、可复用后端契约测试及自动 Docker CI；保留公共 API 与 Java 17 基线。行为与验证范围见 [2.1.1 发布说明](https://github.com/AlanDevise/TsGate/wiki/ZH-Release-Notes-2.1.1)。
 
 详见 [2.1.0 发布说明](https://github.com/AlanDevise/TsGate/wiki/ZH-Release-Notes-2.1.0)。
 

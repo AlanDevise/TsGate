@@ -1,0 +1,5 @@
+backend,module,contractTest,BATCH_WRITE,FIELD_SORT,STRICT_COMPOSITE_CURSOR,REGIONAL_CALENDAR_DAY
+iotdb,tsgate-iotdb,com.alandevise.tsgate.adapter.impl.IoTDBSharedAdapterContractTest,CONFIG_REQUIRED,SUPPORTED,SUPPORTED,SUPPORTED
+influxdb3,tsgate-influxdb3,com.alandevise.tsgate.adapter.impl.InfluxDB3SharedAdapterContractTest,SUPPORTED,SUPPORTED,CONFIG_REQUIRED,SUPPORTED
+influxdb1,tsgate-influxdb1,com.alandevise.tsgate.adapter.impl.InfluxDB1SharedAdapterContractTest,SUPPORTED,UNSUPPORTED,UNSUPPORTED,UNSUPPORTED
+opengemini,tsgate-opengemini,com.alandevise.tsgate.adapter.impl.OpenGeminiSharedAdapterContractTest,SUPPORTED,UNSUPPORTED,UNSUPPORTED,UNSUPPORTED

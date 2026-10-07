@@ -14,6 +14,8 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.Instant;
 import java.util.*;
 import java.util.stream.Stream;
@@ -252,6 +254,121 @@ class TGTemplateTest {
         assertThat(template.query(Point.class).limit(1).page(Map.class).getNextCursorTime()).isEqualTo(1234L);
         when(adapter.query(isNull(), any())).thenReturn(rows(Map.of("time", Instant.ofEpochMilli(1234L).toString()), row(2L, "a", 2.0)));
         assertThat(template.query(Point.class).limit(1).page(Map.class).getNextCursorTime()).isEqualTo(1234L);
+    }
+
+    @ParameterizedTest @MethodSource("exactCursorTimes")
+    void cursorTimesPreserveExactNumericBoundariesAndTemporalResolution(Object time, long expected) {
+        when(adapter.query(isNull(), any())).thenReturn(rows(
+                Map.of("time", time, "device_code", "a"), row(2L, "b", 2.0)));
+        assertThat(template.query(Point.class).limit(1).page(Map.class).getNextCursorTime()).isEqualTo(expected);
+        assertThat(template.query(Point.class).limit(1).strictCursorPage(Map.class).getNextCursor())
+                .containsEntry("time", expected).containsEntry("device_code", "a");
+    }
+
+    static Stream<Arguments> exactCursorTimes() {
+        return Stream.of(
+                Arguments.of((byte) 12, 12L),
+                Arguments.of((short) -12, -12L),
+                Arguments.of(1234, 1234L),
+                Arguments.of(Long.MIN_VALUE, Long.MIN_VALUE),
+                Arguments.of(Long.MAX_VALUE, Long.MAX_VALUE),
+                Arguments.of(BigInteger.valueOf(Long.MIN_VALUE), Long.MIN_VALUE),
+                Arguments.of(BigInteger.valueOf(Long.MAX_VALUE), Long.MAX_VALUE),
+                Arguments.of(new BigDecimal("9223372036854775807.000"), Long.MAX_VALUE),
+                Arguments.of(new BigDecimal("-9223372036854775808.000"), Long.MIN_VALUE),
+                Arguments.of(1234.0D, 1234L),
+                Arguments.of(-1234.0F, -1234L),
+                Arguments.of(-0.0D, 0L),
+                Arguments.of((double) Long.MIN_VALUE, Long.MIN_VALUE),
+                Arguments.of((float) Long.MIN_VALUE, Long.MIN_VALUE),
+                Arguments.of(Math.nextDown(Math.scalb(1.0D, 63)), 9223372036854774784L),
+                Arguments.of(new java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE), Long.MAX_VALUE),
+                Arguments.of(new Date(Long.MIN_VALUE), Long.MIN_VALUE),
+                Arguments.of(new Date(Long.MAX_VALUE), Long.MAX_VALUE),
+                Arguments.of(Instant.ofEpochMilli(Long.MIN_VALUE), Long.MIN_VALUE),
+                Arguments.of(Instant.ofEpochMilli(Long.MAX_VALUE).toString(), Long.MAX_VALUE),
+                Arguments.of(Instant.parse("1970-01-01T00:00:00.123999999Z"), 123L),
+                Arguments.of("1969-12-31T23:59:59.999999999Z", -1L));
+    }
+
+    @ParameterizedTest @MethodSource("invalidCursorTimes")
+    void timePageRejectsAnUnusableNextCursorInsteadOfReturningTheFirstPageAgain(Object time) {
+        when(adapter.query(isNull(), any())).thenReturn(rows(Map.of("time", time), row(2L, "b", 2.0)));
+        TSDBException failure = assertThrows(TSDBException.class,
+                () -> template.query(Point.class).limit(1).page(Map.class));
+        assertThat(failure.getErrorCode()).isEqualTo(TSDBErrorCodeEnum.QUERY_ERROR);
+        assertThat(failure).hasMessageContaining("time cursor");
+    }
+
+    @ParameterizedTest @MethodSource("invalidCursorTimes")
+    void strictCursorRejectsInvalidTimeEvenOnTheLastPage(Object time) {
+        when(adapter.query(isNull(), any())).thenReturn(rows(Map.of("time", time, "device_code", "a")));
+        TSDBException failure = assertThrows(TSDBException.class,
+                () -> template.query(Point.class).limit(1).strictCursorPage(Map.class));
+        assertThat(failure.getErrorCode()).isEqualTo(TSDBErrorCodeEnum.QUERY_ERROR);
+        assertThat(failure).hasMessageContaining("time");
+    }
+
+    @ParameterizedTest @MethodSource("invalidCursorTimes")
+    void invalidNumericOrOverflowingPhysicalTimeStillFallsBackToUsableAliases(Object time) {
+        Map<String, Object> first = new LinkedHashMap<>();
+        first.put("event_time", time);
+        first.put("EVENT_TIME", time);
+        first.put("time", time);
+        first.put("Time", time);
+        first.put("_time", time);
+        first.put("timestamp", Instant.ofEpochMilli(1234L));
+        when(adapter.query(isNull(), any())).thenReturn(rows(first, row(2L, "b", 2.0)));
+        assertThat(template.query(CustomTimePoint.class).limit(1).page(Map.class).getNextCursorTime())
+                .isEqualTo(1234L);
+    }
+
+    static Stream<Object> invalidCursorTimes() {
+        return Stream.of(
+                1.9D, -1.9F, new BigDecimal("0.1"),
+                Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY,
+                Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY,
+                BigInteger.valueOf(Long.MAX_VALUE).add(BigInteger.ONE),
+                BigInteger.valueOf(Long.MIN_VALUE).subtract(BigInteger.ONE),
+                new BigDecimal("9223372036854775808"), new BigDecimal("-9223372036854775809"),
+                (double) Long.MAX_VALUE, Math.nextDown((double) Long.MIN_VALUE),
+                new BigDecimal("1E+2147483647"), new BigDecimal("1E-2147483647"),
+                Instant.MAX, Instant.MIN, Instant.MAX.toString(), Instant.MIN.toString(),
+                "invalid time", " ", new Object());
+    }
+
+    @Test void timePageRejectsMissingAndNullTimeWhenAnotherPageExists() {
+        when(adapter.query(isNull(), any())).thenReturn(rows(Map.of("value", 1), row(2L, "b", 2.0)));
+        assertThat(assertThrows(TSDBException.class,
+                () -> template.query(Point.class).limit(1).page(Map.class)).getErrorCode())
+                .isEqualTo(TSDBErrorCodeEnum.QUERY_ERROR);
+        when(adapter.query(isNull(), any())).thenReturn(rows(cursorEntries("time", null), row(2L, "b", 2.0)));
+        assertThat(assertThrows(TSDBException.class,
+                () -> template.query(Point.class).limit(1).page(Map.class)).getErrorCode())
+                .isEqualTo(TSDBErrorCodeEnum.QUERY_ERROR);
+    }
+
+    @Test void finalTimePageDoesNotRequireACursorAndEmptyPagesStaySuccessful() {
+        when(adapter.query(isNull(), any())).thenReturn(rows(Map.of("time", 1.9D)));
+        PageResult<Map> last = template.query(Point.class).limit(1).page(Map.class);
+        assertThat(last.getRows()).containsExactly(Map.of("time", 1.9D));
+        assertThat(last.isHasNext()).isFalse();
+        assertThat(last.getNextCursorTime()).isNull();
+        assertThat(last.getNextCursor()).isEmpty();
+        when(adapter.query(isNull(), any())).thenReturn(rows());
+        PageResult<Map> empty = template.query(Point.class).limit(1).page(Map.class);
+        assertThat(empty.getRows()).isEmpty();
+        assertThat(empty.isHasNext()).isFalse();
+        assertThat(empty.getNextCursorTime()).isNull();
+        assertThat(template.query(Point.class).limit(1).strictCursorPage(Map.class).getRows()).isEmpty();
+    }
+
+    @Test void strictCursorValidatesEveryReturnedTimeInsteadOfOnlyTheBoundaryRow() {
+        when(adapter.query(isNull(), any())).thenReturn(rows(
+                Map.of("time", Double.NaN, "device_code", "a"), row(2L, "b", 2.0), row(3L, "c", 3.0)));
+        assertThat(assertThrows(TSDBException.class,
+                () -> template.query(Point.class).limit(2).strictCursorPage(Map.class)).getErrorCode())
+                .isEqualTo(TSDBErrorCodeEnum.QUERY_ERROR);
     }
 
     @Test void unsupportedCursorAggregationOrCustomSortFailsBeforeIo() {

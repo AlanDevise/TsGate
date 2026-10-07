@@ -6,7 +6,7 @@
     <parent>
         <groupId>io.github.alandevise</groupId>
         <artifactId>tsgate</artifactId>
-        <version>2.1.0</version>
+        <version>2.1.1</version>
     </parent>
 
     <artifactId>tsgate-core</artifactId>
@@ -15,6 +15,38 @@
     <description>Shared annotations, models, metadata resolver and template</description>
 
     <build>
+        <testResources>
+            <testResource>
+                <directory>src/test/resources</directory>
+            </testResource>
+            <testResource>
+                <directory>${maven.multiModuleProjectDirectory}</directory>
+                <targetPath>META-INF</targetPath>
+                <includes><include>LICENSE</include><include>NOTICE</include></includes>
+            </testResource>
+        </testResources>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>shared-adapter-contracts</id>
+                        <phase>process-test-classes</phase>
+                        <goals><goal>test-jar</goal></goals>
+                        <configuration>
+                            <includes>
+                                <include>com/alandevise/tsgate/contract/**</include>
+                                <include>contracts/*.csv</include>
+                                <include>META-INF/LICENSE</include>
+                                <include>META-INF/NOTICE</include>
+                            </includes>
+                            <excludes><exclude>**/*Test.class</exclude></excludes>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
         <resources>
             <resource>
                 <directory>src/main/resources</directory>
