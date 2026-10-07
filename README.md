@@ -27,6 +27,32 @@ Applications can integrate an adapter directly or use its Spring Boot starter. E
 - Independent Spring Boot starters, YAML configuration and native or compatible client access.
 - A Java 17 baseline and Apache-2.0 licensing.
 
+## Maven dependencies
+
+For Spring Boot applications, add the chosen dependency inside `<dependencies>` in `pom.xml`. Each starter includes its adapter and the shared core.
+
+### InfluxDB 1.x
+
+```xml
+<dependency>
+    <groupId>io.github.alandevise</groupId>
+    <artifactId>tsgate-influxdb1-spring-boot-starter</artifactId>
+    <version>2.1.0</version>
+</dependency>
+```
+
+### IoTDB
+
+```xml
+<dependency>
+    <groupId>io.github.alandevise</groupId>
+    <artifactId>tsgate-iotdb-spring-boot-starter</artifactId>
+    <version>2.1.0</version>
+</dependency>
+```
+
+In `application.yml`, set the chosen backend's `tsdb.influxdb1.enable` or `tsdb.iotdb.enable` to `true` and supply its connection settings. See [configuration examples](https://github.com/AlanDevise/TsGate/wiki/EN-Configuration).
+
 ## Architecture
 
 ```mermaid
@@ -108,11 +134,11 @@ InfluxDB 3 strict composite cursor pagination defaults to `tsdb.influxdb.strict-
 
 Maven artifacts use the GitHub-identity groupId `io.github.alandevise` and Java packages use `com.alandevise.tsgate.*`. Strict cursors preserve backend column identity and reject invalid time boundaries. All adapters have idempotent initialization and terminal closure; IoTDB applications must create a new instance after close. The bilingual Wiki documents cursor keys, supported Map result types and lifecycle rules.
 
-TsGate 2.1.0 moves Java packages from `com.alandevise.tsdb.*` to `com.alandevise.tsgate.*`. Update imports, reflection names and package-scanning settings, then recompile applications and dependent libraries. This package change is not binary compatible. Maven coordinates, `tsdb.*` configuration prefixes, type names and the `tgTemplate` bean name stay the same. Central 2.0.0 retains the old packages. See [2.1.0 migration and release notes](https://github.com/AlanDevise/TsGate/wiki/EN-Release-Notes-2.1.0).
+See the [2.1.0 release notes](https://github.com/AlanDevise/TsGate/wiki/EN-Release-Notes-2.1.0).
 
 The optional `tsgate-bom` consolidates the verified client dependency versions into one explicit Maven import. It manages versions without adding unused clients to the application. InfluxDB 3 Arrow JVM options still belong to the application launcher; see the bilingual getting-started guides.
 
-Version 2.1.0 also includes constructor-time configuration snapshots, strict cursor input validation, consistent structured-query argument errors, and startup failure handling with optional native clients. Configuration changes require a new adapter/context. The bilingual Wiki records migration steps and exact verification scope; [release status](https://github.com/AlanDevise/TsGate/wiki/EN-Testing-and-Publishing#tsgate-210-release-status) is tracked separately from test results.
+Version 2.1.0 also includes constructor-time configuration snapshots, strict cursor input validation, consistent structured-query argument errors, and startup failure handling with optional native clients. Configuration changes require a new adapter/context. The bilingual Wiki records configuration guidance and exact verification scope; [release status](https://github.com/AlanDevise/TsGate/wiki/EN-Testing-and-Publishing#tsgate-210-release-status) is tracked separately from test results.
 
 Version 2.1.0 adds openGemini adapters and starters for **1.4.1 / 1.5.2 default-engine** deployments, verified as single nodes and three-node/three-replica clusters. Applications use the existing `TGTemplate`, annotations and fluent queries with the `tsdb.opengemini` prefix and a reachable SQL endpoint. The adapter reuses the bounded InfluxDB 1.x-compatible HTTP implementation; strict composite cursors, FIELD sorting, regional calendar-day windows and COLUMNSTORE/Arrow are outside its supported scope. Its borrowed compatible native client is `org.influxdb.InfluxDB`. Integer preflight prevents known float64 rounding on this HTTP path; new-series indexes become query-visible asynchronously after acknowledgement. See the [OpenGemini guide](https://github.com/AlanDevise/TsGate/wiki/EN-OpenGemini) for the exact boundaries. Central 2.0.0 does not contain these new modules.
 

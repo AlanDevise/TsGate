@@ -27,6 +27,32 @@ TsGate 是一个模块化的 Java 时序数据库适配组件。它以统一 API
 - 独立 Spring Boot starter、YAML 配置和原生或兼容客户端访问。
 - Java 17 运行基线与 Apache-2.0 许可证。
 
+## Maven 依赖
+
+Spring Boot 应用在 `pom.xml` 的 `<dependencies>` 中加入所选依赖即可。每个 starter 已包含对应 adapter 和公共 core。
+
+### InfluxDB 1.x
+
+```xml
+<dependency>
+    <groupId>io.github.alandevise</groupId>
+    <artifactId>tsgate-influxdb1-spring-boot-starter</artifactId>
+    <version>2.1.0</version>
+</dependency>
+```
+
+### IoTDB
+
+```xml
+<dependency>
+    <groupId>io.github.alandevise</groupId>
+    <artifactId>tsgate-iotdb-spring-boot-starter</artifactId>
+    <version>2.1.0</version>
+</dependency>
+```
+
+在 `application.yml` 中将所选后端的 `tsdb.influxdb1.enable` 或 `tsdb.iotdb.enable` 设为 `true`，并填写连接参数。详见 [配置示例](https://github.com/AlanDevise/TsGate/wiki/ZH-Configuration)。
+
 ## 架构设计
 
 ```mermaid
@@ -108,11 +134,11 @@ InfluxDB 3 严格复合游标分页默认使用 `tsdb.influxdb.strict-cursor-sql
 
 Maven 制品采用 GitHub 身份对应的 groupId `io.github.alandevise`，Java 包为 `com.alandevise.tsgate.*`。严格游标按后端物理列身份处理并拒绝非法时间边界；四个后端均采用幂等初始化与终态关闭，IoTDB 在关闭后需创建新实例。游标键、受支持的 Map 结果类型及生命周期规则详见中英文 Wiki。
 
-TsGate 2.1.0 将 Java 包从 `com.alandevise.tsdb.*` 迁移为 `com.alandevise.tsgate.*`。业务应用及依赖库须更新 import、反射类名和包扫描配置，并重新编译；此包名变更不兼容旧二进制。Maven 坐标、`tsdb.*` 配置前缀、类型名及 `tgTemplate` Bean 名保持不变，Central 2.0.0 保留旧包名。详见 [2.1.0 迁移与发布说明](https://github.com/AlanDevise/TsGate/wiki/ZH-Release-Notes-2.1.0)。
+详见 [2.1.0 发布说明](https://github.com/AlanDevise/TsGate/wiki/ZH-Release-Notes-2.1.0)。
 
 可选的 `tsgate-bom` 将已验证的客户端依赖版本收敛为一次显式 Maven 导入；它只管理版本，不会让业务引入未使用的客户端。InfluxDB 3 的 Arrow JVM 参数仍需配置到业务启动进程，详见中英文入门指南。
 
-2.1.0 还纳入构造时配置快照、严格游标输入校验、统一结构化查询参数错误，以及支持原生客户端可选注入的启动失败策略。修改配置需要新 adapter/上下文。中英文 Wiki 记录迁移步骤与准确验证范围；[发布状态](https://github.com/AlanDevise/TsGate/wiki/ZH-Testing-and-Publishing#tsgate-210-发布状态)与测试结果分别记录。
+2.1.0 还纳入构造时配置快照、严格游标输入校验、统一结构化查询参数错误，以及支持原生客户端可选注入的启动失败策略。修改配置需要新 adapter/上下文。中英文 Wiki 记录配置说明与准确验证范围；[发布状态](https://github.com/AlanDevise/TsGate/wiki/ZH-Testing-and-Publishing#tsgate-210-发布状态)与测试结果分别记录。
 
 2.1.0 新增 openGemini adapter 与 starter，支持 **1.4.1 / 1.5.2 默认引擎**，已验证单节点和三节点三副本集群。业务沿用 `TGTemplate`、注解和链式查询，使用 `tsdb.opengemini` 前缀与可达的 SQL 入口。实现复用有界的 InfluxDB 1.x 兼容 HTTP 协议；严格复合游标、FIELD 排序、区域日历日窗口及 COLUMNSTORE/Arrow 不在支持范围内。借用的兼容原生客户端为 `org.influxdb.InfluxDB`。整数前检防止此 HTTP 路径已知的 float64 舍入；新 series 索引在写入确认后异步对查询可见。准确边界见 [OpenGemini 指南](https://github.com/AlanDevise/TsGate/wiki/ZH-OpenGemini)。Central 2.0.0 不包含这两个新模块。
 
