@@ -1259,6 +1259,7 @@ public class IoTDBTableAdapter implements TSDBAdapter {
                 selections.add(toAggregationSql(aggregation.function(), aggregation.field())
                         + " AS " + normalizeIdentifier(aggregation.alias()));
             }
+            TSDBQueryValidator.validateAggregationOutputNames(query, this::normalizeColumnIdentifier);
             return selections;
         }
         if (query.getSelectColumns() == null || query.getSelectColumns().isEmpty()) {

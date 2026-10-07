@@ -55,6 +55,7 @@ public class InfluxDB1Adapter implements TSDBAdapter {
     private final InfluxDB1Properties config;
     private final InfluxDB1HttpClientProperties httpConfig;
     private final int maxBatchRecords;
+    private final long maxBatchBytes;
     private final int maxQueryRows;
     private final long maxQueryResponseBytes;
     private final boolean queryLogEnabled;
@@ -96,6 +97,11 @@ public class InfluxDB1Adapter implements TSDBAdapter {
         }
         this.httpConfig = httpConfig;
         this.maxBatchRecords = resolveMaxBatchRecords(config);
+        if (config.getMaxBatchBytes() <= 0) {
+            throw new TSDBException(TSDBErrorCodeEnum.CONFIGURATION_ERROR,
+                    "tsdb.influxdb1.max-batch-bytes must be greater than 0");
+        }
+        this.maxBatchBytes = config.getMaxBatchBytes();
         if (isBlank(config.getUrl()) || HttpUrl.parse(config.getUrl()) == null || isBlank(config.getDatabase())) {
             throw new TSDBException(TSDBErrorCodeEnum.CONFIGURATION_ERROR, "InfluxDB1 url and database must be valid and nonempty");
         }
@@ -124,6 +130,7 @@ public class InfluxDB1Adapter implements TSDBAdapter {
         copy.setPassword(source.getPassword());
         copy.setRetentionPolicy(source.getRetentionPolicy());
         copy.setMaxBatchRecords(source.getMaxBatchRecords());
+        copy.setMaxBatchBytes(source.getMaxBatchBytes());
         copy.setMaxQueryRows(source.getMaxQueryRows());
         copy.setMaxQueryResponseBytes(source.getMaxQueryResponseBytes());
         return copy;
@@ -270,6 +277,8 @@ public class InfluxDB1Adapter implements TSDBAdapter {
                 .readTimeout(httpConfig.getReadTimeoutMs(), TimeUnit.MILLISECONDS)
                 .writeTimeout(httpConfig.getWriteTimeoutMs(), TimeUnit.MILLISECONDS)
                 .callTimeout(httpConfig.getCallTimeoutMs(), TimeUnit.MILLISECONDS)
+                .followRedirects(false)
+                .followSslRedirects(false)
                 .retryOnConnectionFailure(httpConfig.isRetryOnConnectionFailure());
     }
 
@@ -366,7 +375,9 @@ public class InfluxDB1Adapter implements TSDBAdapter {
     public QueryResult query(String database, TSDBQuery query) {
         validateQuery(query);
         int cap = maxQueryRows + (query.isPaginationProbe() ? 1 : 0);
-        QueryResult result = execute(resolveDatabase(database), buildQuery(query, true), cap, false).result();
+        String sql = buildQuery(query, true);
+        validateAggregationOutputNames(query);
+        QueryResult result = execute(resolveDatabase(database), sql, cap, false).result();
         if (query.hasAggregations() && !isBlank(query.getGroupByTime())) {
             for (Map<String, Object> row : result.getRows()) {
                 if (row.containsKey("window_start"))
@@ -416,7 +427,9 @@ public class InfluxDB1Adapter implements TSDBAdapter {
         snapshot.setLimit(null);
         snapshot.setOffset(null);
         validateQuery(snapshot);
-        return execute(resolveDatabase(database), buildQuery(snapshot, false), maxQueryRows, true).count();
+        String sql = buildQuery(snapshot, false);
+        validateAggregationOutputNames(snapshot);
+        return execute(resolveDatabase(database), sql, maxQueryRows, true).count();
     }
 
     private ReadResult execute(String database, String sql, int rowLimit, boolean countOnly) {
@@ -571,6 +584,17 @@ public class InfluxDB1Adapter implements TSDBAdapter {
         return new TSDBException(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION, message);
     }
 
+    /** Rejects aggregate outputs that collide with InfluxQL's implicit time column. */
+    private void validateAggregationOutputNames(TSDBQuery query) {
+        TSDBQueryValidator.validateAggregationOutputNames(query, this::normalizeColumnIdentifier);
+        if (!query.hasAggregations()) return;
+        if (query.getGroupByTags().contains("time") || query.getAggregations().stream()
+                .anyMatch(aggregation -> "time".equals(aggregation.alias()))) {
+            throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                    "InfluxQL aggregate output name conflicts with the implicit time column: time");
+        }
+    }
+
     private static void validateQuery(TSDBQuery query) {
         TSDBQueryValidator.validate(query);
         if (query == null || isBlank(query.getMeasurement()))
@@ -596,9 +620,6 @@ public class InfluxDB1Adapter implements TSDBAdapter {
             if (query.getStartTime() == null || query.getEndTime() == null)
                 throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR,
                         "InfluxQL time-window aggregation requires an explicit bounded timeRange; the server's default end is now()");
-            if (query.getGroupByTags().contains("window_start") || query.getAggregations().stream()
-                    .anyMatch(aggregation -> "window_start".equals(aggregation.alias())))
-                throw unsupported("window_start is reserved for the generated window boundary in time-window queries");
         }
     }
 
@@ -775,7 +796,7 @@ public class InfluxDB1Adapter implements TSDBAdapter {
             // Snapshot, validate, and encode every record before sending to prevent partial writes caused by invalid data.
             snapshot = List.copyOf(records);
             validateBatchSize(snapshot);
-            batches = prepareWriteBatches(snapshot);
+            batches = prepareWriteBatches(snapshot, maxBatchBytes);
             HttpUrl.Builder writeUrl = apiUrl("write")
                     .addQueryParameter("db", resolveDatabase(database))
                     .addQueryParameter("precision", "ms");
@@ -833,11 +854,12 @@ public class InfluxDB1Adapter implements TSDBAdapter {
                 || (statusCode >= 500 && statusCode < 600 && statusCode != 501 && statusCode != 505);
     }
 
-    private static List<PreparedWriteBatch> prepareWriteBatches(List<TSDBRecord> records) {
+    private static List<PreparedWriteBatch> prepareWriteBatches(List<TSDBRecord> records, long maxBatchBytes) {
         List<PreparedWriteBatch> batches = new ArrayList<>();
         StringBuilder payload = new StringBuilder();
         int lineCount = 0;
         int payloadBytes = 0;
+        long totalPayloadBytes = 0;
         String firstMeasurement = null;
         for (TSDBRecord tsdbRecord : records) {
             String line = buildLineProtocol(tsdbRecord);
@@ -859,6 +881,13 @@ public class InfluxDB1Adapter implements TSDBAdapter {
                 payloadBytes = 0;
                 firstMeasurement = null;
             }
+            // Count only bytes sent on the wire: physical requests have no separator between them.
+            long additionalBytes = (long) lineBytes + (payload.isEmpty() ? 0 : 1);
+            if (additionalBytes > maxBatchBytes - totalPayloadBytes) {
+                throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                        "InfluxDB1 batch exceeds maximum combined UTF-8 payload bytes: " + maxBatchBytes);
+            }
+            totalPayloadBytes += additionalBytes;
             // The first measurement identifies failures; it does not determine batch boundaries.
             if (firstMeasurement == null) {
                 firstMeasurement = tsdbRecord.measurement();

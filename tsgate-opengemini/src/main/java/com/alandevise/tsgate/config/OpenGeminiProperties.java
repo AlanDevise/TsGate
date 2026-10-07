@@ -47,6 +47,12 @@ public class OpenGeminiProperties {
      */
     private int maxBatchRecords = 10_000;
     /**
+     * Maximum combined UTF-8 line-protocol payload bytes per application batch; defaults to 64 MiB.
+     * Includes newlines within each physical request, with no separator between requests.
+     * The entire batch is validated and encoded before I/O; oversized batches are rejected without writes.
+     */
+    private long maxBatchBytes = 64L * 1024 * 1024;
+    /**
      * Ordinary and native queries share this row cap, defaulting to 10,000; pagination probes may read one extra row.
      * Count scans are exempt from the row cap but retain the response-byte limit.
      */

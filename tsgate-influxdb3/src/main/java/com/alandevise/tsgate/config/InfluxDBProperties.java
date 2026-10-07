@@ -51,6 +51,12 @@ public class InfluxDBProperties {
      */
     private int maxBatchRecords = 10_000;
     /**
+     * Maximum combined UTF-8 line-protocol payload bytes per application batch; defaults to 64 MiB.
+     * Includes newlines within each physical request, with no separator between requests.
+     * The entire batch is validated and encoded before I/O; oversized batches are rejected without writes.
+     */
+    private long maxBatchBytes = 64L * 1024 * 1024;
+    /**
      * Maximum result rows for native SQL and ordinary structured queries. An explicit pagination
      * probe may read one extra sentinel. Exceeding the limit fails rather than returning a partial result.
      */

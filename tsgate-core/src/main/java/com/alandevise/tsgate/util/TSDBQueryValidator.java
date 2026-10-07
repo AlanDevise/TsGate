@@ -2,7 +2,12 @@ package com.alandevise.tsgate.util;
 
 import com.alandevise.tsgate.exception.TSDBErrorCodeEnum;
 import com.alandevise.tsgate.exception.TSDBException;
+import com.alandevise.tsgate.model.AggregationSpec;
 import com.alandevise.tsgate.model.TSDBQuery;
+
+import java.util.HashSet;
+import java.util.Set;
+import java.util.function.UnaryOperator;
 
 /**
  * Validates shared query arguments before adapter-specific SQL translation or database I/O.
@@ -37,6 +42,50 @@ public final class TSDBQueryValidator {
         if (query.getStartTime() != null && query.getEndTime() != null
                 && query.getStartTime() > query.getEndTime()) {
             throw argument("startTime must be less than or equal to endTime");
+        }
+    }
+
+    /**
+     * Rejects colliding aggregate output names using the backend's physical column identity.
+     * <p>The generated {@code window_start} name is reserved only when a time window is emitted.
+     * Grouping tags and aggregate aliases share the same result namespace. Detail projections,
+     * caller-owned query state, and native SQL remain unchanged. Adapters invoke this after their
+     * unsupported-operation checks and before submitting the translated query.</p>
+     *
+     * @param query common query whose aggregate result names are validated
+     * @param normalizeColumn backend column normalizer, preserving quoted case when applicable
+     * @throws TSDBException with {@code ARGUMENT_ERROR} for duplicate aggregate output names
+     */
+    public static void validateAggregationOutputNames(TSDBQuery query, UnaryOperator<String> normalizeColumn) {
+        if (query == null) {
+            throw argument("query must not be null");
+        }
+        if (!query.hasAggregations()) {
+            return;
+        }
+        Set<String> outputNames = new HashSet<>();
+        if (query.getGroupByTime() != null && !query.getGroupByTime().isBlank()) {
+            addAggregationOutputName(outputNames, "window_start", normalizeColumn);
+        }
+        for (String tag : query.getGroupByTags()) {
+            addAggregationOutputName(outputNames, tag, normalizeColumn);
+        }
+        for (AggregationSpec aggregation : query.getAggregations()) {
+            if (aggregation == null) {
+                throw argument("aggregation must not be null");
+            }
+            addAggregationOutputName(outputNames, aggregation.alias(), normalizeColumn);
+        }
+    }
+
+    private static void addAggregationOutputName(Set<String> outputNames, String name,
+                                                 UnaryOperator<String> normalizeColumn) {
+        String normalized = normalizeColumn.apply(name);
+        if (normalized == null || normalized.isBlank()) {
+            throw argument("aggregation output name must not be empty");
+        }
+        if (!outputNames.add(normalized)) {
+            throw argument("Duplicate aggregation output name: " + name);
         }
     }
 

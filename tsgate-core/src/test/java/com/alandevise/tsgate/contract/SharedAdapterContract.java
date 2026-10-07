@@ -1,8 +1,16 @@
 package com.alandevise.tsgate.contract;
 
+import com.alandevise.tsgate.annotation.TGField;
+import com.alandevise.tsgate.annotation.TGMeasurement;
+import com.alandevise.tsgate.annotation.TGTag;
+import com.alandevise.tsgate.annotation.TGTime;
+import com.alandevise.tsgate.core.TGQueryBuilder;
+import com.alandevise.tsgate.core.TGTemplate;
 import com.alandevise.tsgate.exception.TSDBBatchWriteException;
 import com.alandevise.tsgate.exception.TSDBErrorCodeEnum;
 import com.alandevise.tsgate.exception.TSDBException;
+import com.alandevise.tsgate.model.AggregationFunctionEnum;
+import com.alandevise.tsgate.model.AggregationSpec;
 import com.alandevise.tsgate.model.BatchCommitStateEnum;
 import com.alandevise.tsgate.model.BatchWriteResult;
 import com.alandevise.tsgate.model.OperatorEnum;
@@ -255,6 +263,108 @@ public interface SharedAdapterContract {
                 assertEquals(0, fixture.ioCount());
             }
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"aliases", "tag-alias", "tags", "window-tag", "window-alias"})
+    default void sharedAggregateOutputCollisionsFailBeforeQueryCountOrTemplateIo(String scenario) throws Exception {
+        try (SharedAdapterFixture fixture = createFixture()) {
+            fixture.initialize();
+            TSDBQuery query = aggregateOutputQuery(scenario, false);
+            assertError(TSDBErrorCodeEnum.ARGUMENT_ERROR, () -> fixture.adapter().query(null, query));
+            assertError(TSDBErrorCodeEnum.ARGUMENT_ERROR, () -> fixture.adapter().count(null, query));
+            TGQueryBuilder<AggregateContractPoint> builder = aggregateTemplateQuery(fixture, query);
+            assertError(TSDBErrorCodeEnum.ARGUMENT_ERROR, () -> builder.list(Map.class));
+            assertError(TSDBErrorCodeEnum.ARGUMENT_ERROR, () -> builder.page(1, 2, Map.class));
+            assertEquals(0, fixture.ioCount());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"aliases", "tag-alias", "tags", "window-tag", "window-alias"})
+    default void sharedAggregateOutputCaseUsesTheBackendColumnIdentity(String scenario) throws Exception {
+        try (SharedAdapterFixture fixture = createFixture()) {
+            fixture.initialize();
+            TSDBQuery query = aggregateOutputQuery(scenario, true);
+            TGQueryBuilder<AggregateContractPoint> builder = aggregateTemplateQuery(fixture, query);
+            boolean foldsCase = fixture.adapter().normalizeColumnIdentifier("total")
+                    .equals(fixture.adapter().normalizeColumnIdentifier("TOTAL"));
+            if (foldsCase) {
+                assertError(TSDBErrorCodeEnum.ARGUMENT_ERROR, () -> fixture.adapter().query(null, query));
+                assertError(TSDBErrorCodeEnum.ARGUMENT_ERROR, () -> fixture.adapter().count(null, query));
+                assertError(TSDBErrorCodeEnum.ARGUMENT_ERROR, () -> builder.list(Map.class));
+                assertError(TSDBErrorCodeEnum.ARGUMENT_ERROR, () -> builder.page(1, 2, Map.class));
+                assertEquals(0, fixture.ioCount());
+            } else {
+                fixture.enqueueRows();
+                assertTrue(fixture.adapter().query(null, query).isSuccess());
+                fixture.enqueueCount(0);
+                assertEquals(0, fixture.adapter().count(null, query));
+                fixture.enqueueRows();
+                assertTrue(builder.list(Map.class).isEmpty());
+                fixture.enqueueCount(0);
+                assertEquals(0L, builder.page(1, 2, Map.class).getTotal().longValue());
+                assertEquals(4, fixture.ioCount());
+            }
+        }
+    }
+
+    @Test
+    default void sharedWindowStartAliasIsAvailableWithoutAGeneratedWindow() throws Exception {
+        try (SharedAdapterFixture fixture = createFixture()) {
+            fixture.initialize();
+            TSDBQuery query = detail();
+            query.setAggregations(List.of(new AggregationSpec("value", AggregationFunctionEnum.SUM, "window_start")));
+            fixture.enqueueRows();
+            assertTrue(fixture.adapter().query(null, query).isSuccess());
+            fixture.enqueueCount(0);
+            assertEquals(0, fixture.adapter().count(null, query));
+            assertEquals(2, fixture.ioCount());
+        }
+    }
+
+    private static TSDBQuery aggregateOutputQuery(String scenario, boolean caseDistinct) {
+        TSDBQuery query = detail();
+        query.setStartTime(0L);
+        query.setEndTime(3_600_000L);
+        query.setAggregations(List.of(new AggregationSpec("value", AggregationFunctionEnum.SUM, "total")));
+        String total = caseDistinct ? "TOTAL" : "total";
+        String window = caseDistinct ? "WINDOW_START" : "window_start";
+        switch (scenario) {
+            case "aliases" -> query.getAggregations().add(new AggregationSpec("value", AggregationFunctionEnum.MAX, total));
+            case "tag-alias" -> query.setGroupByTags(List.of(total));
+            case "tags" -> query.setGroupByTags(List.of("device", caseDistinct ? "DEVICE" : "device"));
+            case "window-tag" -> { query.setGroupByTime("1h"); query.setGroupByTags(List.of(window)); }
+            case "window-alias" -> {
+                query.setGroupByTime("1h");
+                query.setAggregations(List.of(new AggregationSpec("value", AggregationFunctionEnum.SUM, window)));
+            }
+            default -> throw new AssertionError(scenario);
+        }
+        return query;
+    }
+
+    private static TGQueryBuilder<AggregateContractPoint> aggregateTemplateQuery(SharedAdapterFixture fixture,
+                                                                                TSDBQuery query) {
+        TGQueryBuilder<AggregateContractPoint> builder = new TGTemplate(fixture.adapter()).query(AggregateContractPoint.class)
+                .groupByTags(query.getGroupByTags());
+        if (query.getStartTime() != null && query.getEndTime() != null) {
+            builder.timeRange(query.getStartTime(), query.getEndTime());
+        }
+        if (query.getGroupByTime() != null) {
+            builder.groupByTime(query.getGroupByTime());
+        }
+        for (AggregationSpec aggregation : query.getAggregations()) {
+            builder.aggregate(aggregation.field(), aggregation.function(), aggregation.alias());
+        }
+        return builder;
+    }
+
+    @TGMeasurement("points")
+    class AggregateContractPoint {
+        @TGTime public Long time;
+        @TGTag public String device;
+        @TGField public Integer value;
     }
 
     static TSDBQuery detail() {

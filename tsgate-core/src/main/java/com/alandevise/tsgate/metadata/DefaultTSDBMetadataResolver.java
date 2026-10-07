@@ -22,6 +22,7 @@ import java.util.*;
  * <h2>Default reflection-based annotation metadata resolver</h2>
  *
  * <p>Uses {@link ClassValue} to cache metadata by class and converts POJOs into {@link TSDBRecord} for writes.
+ * Independent read plans cache constructors, inherited fields, target types, and column-name candidates without requiring write annotations.
  * Reads match annotated physical columns; unannotated DTOs also support field names and snake_case to camelCase.
  * Cache entries follow their class lifecycle, avoiding strong map references that prevent dynamic class unloading.</p>
  *
@@ -138,6 +139,51 @@ public class DefaultTSDBMetadataResolver implements TSDBMetadataResolver {
     };
 
     /**
+     * Read plans are separate from write metadata so plain DTOs need no measurement, time, or field annotations.
+     * ClassValue owns each plan with its result class; no global map retains application class loaders.
+     * Concurrent computations are repeatable and never construct a business object or retain a result row.
+     */
+    private final ClassValue<ResultMappingPlan> readPlans = new ClassValue<>() {
+        @Override
+        protected ResultMappingPlan computeValue(Class<?> type) {
+            Constructor<?> constructor = resultConstructor(type);
+            List<ResultFieldPlan> fields = new ArrayList<>();
+            for (Field field : fieldsOf(type)) {
+                if (Modifier.isStatic(field.getModifiers())) {
+                    continue;
+                }
+                List<String> names = new ArrayList<>();
+                addAnnotationColumnCandidates(field, names);
+                boolean physicalOnly = !names.isEmpty();
+                if (!physicalOnly) {
+                    names.add(field.getName());
+                    names.add(toSnakeCase(field.getName()));
+                    if (isTimeField(field)) {
+                        Collections.addAll(names, "time", "Time", "_time", "timestamp");
+                    }
+                }
+                List<ResultColumnCandidate> candidates = names.stream()
+                        .map(name -> new ResultColumnCandidate(name, name.toLowerCase(Locale.ROOT),
+                                normalizeResultName(name)))
+                        .toList();
+                fields.add(new ResultFieldPlan(field, field.getType(), field.getType().isPrimitive(),
+                        physicalOnly, candidates));
+            }
+            return new ResultMappingPlan(constructor, List.copyOf(fields));
+        }
+    };
+
+    private record ResultMappingPlan(Constructor<?> constructor, List<ResultFieldPlan> fields) {
+    }
+
+    private record ResultFieldPlan(Field field, Class<?> targetType, boolean primitive,
+                                   boolean physicalOnly, List<ResultColumnCandidate> candidates) {
+    }
+
+    private record ResultColumnCandidate(String exactName, String lowerName, String normalizedName) {
+    }
+
+    /**
      * Resolves the TSDB annotation metadata for an entity class.
      *
      * @param entityType annotated business class, for example {@code AccruePoint.class}
@@ -236,14 +282,12 @@ public class DefaultTSDBMetadataResolver implements TSDBMetadataResolver {
         if (row == null) {
             throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "row must not be null");
         }
-        T entity = instantiate(entityType);
+        ResultMappingPlan plan = readPlans.get(entityType);
+        T entity = entityType.cast(instantiate(plan.constructor()));
         Map<String, Object> indexedRow = indexRow(row);
-        for (Field field : fieldsOf(entityType)) {
-            if (Modifier.isStatic(field.getModifiers())) {
-                continue;
-            }
+        for (ResultFieldPlan field : plan.fields()) {
             Object value = findFieldValue(row, indexedRow, field);
-            if (value != UNMAPPED && (value != null || !field.getType().isPrimitive())) {
+            if (value != UNMAPPED && (value != null || !field.primitive())) {
                 writeField(entity, field, value);
             }
         }
@@ -319,43 +363,31 @@ public class DefaultTSDBMetadataResolver implements TSDBMetadataResolver {
      *
      * @param row        original adapter result row, for example {@code Map.of("tag_name", "device001")}
      * @param indexedRow loose row index, for example containing {@code tagname -> device001}
-     * @param field      Java field to map, for example {@code ValueResult.tagName}
+     * @param field      cached field mapping, for example the plan for {@code ValueResult.tagName}
      * @return the matched value, possibly null, or UNMAPPED when no column matches
      * @author Alan Zhang [initiator@alandevise.com]
      * @since 2026-07-02
      */
     private static Object findFieldValue(Map<String, Object> row,
                                          Map<String, Object> indexedRow,
-                                         Field field) {
-        List<String> candidates = new ArrayList<>();
-        addAnnotationColumnCandidates(field, candidates);
-        // Annotated fields use only physical columns so unrelated Java-name matches cannot overwrite their values.
-        if (!candidates.isEmpty()) {
-            for (String column : candidates) {
-                // Prefer exact matches and retain explicit nulls when the column exists.
+                                         ResultFieldPlan field) {
+        // Annotated fields use only physical columns; preserve exact-match and first case-variant precedence.
+        if (field.physicalOnly()) {
+            for (ResultColumnCandidate candidate : field.candidates()) {
+                String column = candidate.exactName();
                 if (row.containsKey(column)) {
                     return row.get(column);
                 }
-                // Physical columns allow case differences but no camelCase or other loose transformations.
+                // Keep equalsIgnoreCase semantics rather than replacing them with locale-based normalization.
                 for (Map.Entry<String, Object> entry : row.entrySet()) {
                     if (column.equalsIgnoreCase(entry.getKey())) {
                         return entry.getValue();
                     }
                 }
             }
-            // Missing physical columns remain unmapped, without falling back to Java names or aliases.
             return UNMAPPED;
         }
-        // Field names, snake_case names, and common time aliases apply only to unannotated DTO fields.
-        candidates.add(field.getName());
-        candidates.add(toSnakeCase(field.getName()));
-        if (isTimeField(field)) {
-            candidates.add("time");
-            candidates.add("Time");
-            candidates.add("_time");
-            candidates.add("timestamp");
-        }
-        for (String candidate : candidates) {
+        for (ResultColumnCandidate candidate : field.candidates()) {
             Object value = findCandidateValue(row, indexedRow, candidate);
             if (value != UNMAPPED) {
                 return value;
@@ -410,28 +442,23 @@ public class DefaultTSDBMetadataResolver implements TSDBMetadataResolver {
      *
      * @param row        original adapter result row, for example {@code Map.of("tag_name", "device001")}
      * @param indexedRow loose row index, for example containing {@code tagname -> device001}
-     * @param candidate  current candidate name, for example {@code "tagName"}
+     * @param candidate  cached candidate names, for example the names for {@code "tagName"}
      * @return the matched value, possibly null, or UNMAPPED when no column matches
      * @author Alan Zhang [initiator@alandevise.com]
      * @since 2026-07-02
      */
     private static Object findCandidateValue(Map<String, Object> row,
                                              Map<String, Object> indexedRow,
-                                             String candidate) {
-        if (candidate == null) {
-            return UNMAPPED;
+                                             ResultColumnCandidate candidate) {
+        // Match the exact name first, including explicit nulls.
+        if (row.containsKey(candidate.exactName())) {
+            return row.get(candidate.exactName());
         }
-        // Match the exact name first.
-        if (row.containsKey(candidate)) {
-            return row.get(candidate);
-        }
-        // Locale.ROOT makes case conversion independent of the server locale, including Turkish I rules.
-        String lowerName = candidate.toLowerCase(Locale.ROOT);
-        // Match without considering case.
-        Object value = indexedRow.get(lowerName);
+        // Candidate normalization is independent of each row and was prepared with Locale.ROOT.
+        Object value = indexedRow.get(candidate.lowerName());
         if (value == null) {
             // Ignore differences in naming convention.
-            value = indexedRow.getOrDefault(normalizeResultName(candidate), UNMAPPED);
+            value = indexedRow.getOrDefault(candidate.normalizedName(), UNMAPPED);
         }
         // Restore the null sentinel to an actual null; missing columns remain UNMAPPED.
         return value == NULL_VALUE ? null : value;
@@ -441,22 +468,23 @@ public class DefaultTSDBMetadataResolver implements TSDBMetadataResolver {
      * Converts a query result value to the Java field type and writes it to the result object.
      *
      * @param target result object, for example {@code new ValueOnlyResult()}
-     * @param field  field to populate, for example {@code ValueOnlyResult.value}
+     * @param plan   cached field mapping, for example the plan for {@code ValueOnlyResult.value}
      * @param value  raw adapter value, for example {@code 12.34D}
      * @author Alan Zhang [initiator@alandevise.com]
      * @since 2026-07-02
      */
-    private static void writeField(Object target, Field field, Object value) {
+    private static void writeField(Object target, ResultFieldPlan plan, Object value) {
+        Field field = plan.field();
         try {
             if (!field.canAccess(target)) {
                 field.setAccessible(true);
             }
-            field.set(target, convertValue(value, field.getType()));
+            field.set(target, convertValue(value, plan.targetType()));
         } catch (IllegalAccessException | RuntimeException e) {
             throw new TSDBException(TSDBErrorCodeEnum.METADATA_ERROR,
                     "Failed to map query result field " + target.getClass().getName() + "." + field.getName()
                     + " from " + (value == null ? "null" : value.getClass().getName())
-                    + " to " + field.getType().getName(), e);
+                    + " to " + plan.targetType().getName(), e);
         }
     }
 
@@ -640,22 +668,35 @@ public class DefaultTSDBMetadataResolver implements TSDBMetadataResolver {
     }
 
     /**
-     * Creates a result object through its no-argument constructor.
+     * Resolves the constructor once without constructing an object during ClassValue computation.
+     * Access failures retain their existing behavior; field accessibility is still checked only for mapped values.
      *
-     * @param entityType result class, for example {@code ValueOnlyResult.class}
-     * @param <T>        result object type
-     * @return a newly constructed result object
-     * @author Alan Zhang [initiator@alandevise.com]
-     * @since 2026-07-02
+     * @param entityType result class
+     * @return accessible no-argument constructor
      */
-    private static <T> T instantiate(Class<T> entityType) {
+    private static Constructor<?> resultConstructor(Class<?> entityType) {
         try {
-            Constructor<T> constructor = entityType.getDeclaredConstructor();
+            Constructor<?> constructor = entityType.getDeclaredConstructor();
             constructor.setAccessible(true);
-            return constructor.newInstance();
+            return constructor;
         } catch (ReflectiveOperationException e) {
             throw new TSDBException(TSDBErrorCodeEnum.METADATA_ERROR,
                     entityType.getName() + " must have a no-args constructor", e);
+        }
+    }
+
+    /**
+     * Constructs a fresh result object for every row and preserves constructor invocation failure details.
+     *
+     * @param constructor cached result constructor
+     * @return a newly constructed result object
+     */
+    private static Object instantiate(Constructor<?> constructor) {
+        try {
+            return constructor.newInstance();
+        } catch (ReflectiveOperationException e) {
+            throw new TSDBException(TSDBErrorCodeEnum.METADATA_ERROR,
+                    constructor.getDeclaringClass().getName() + " must have a no-args constructor", e);
         }
     }
 

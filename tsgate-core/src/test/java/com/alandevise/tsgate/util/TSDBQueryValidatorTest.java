@@ -2,6 +2,8 @@ package com.alandevise.tsgate.util;
 
 import com.alandevise.tsgate.exception.TSDBErrorCodeEnum;
 import com.alandevise.tsgate.exception.TSDBException;
+import com.alandevise.tsgate.model.AggregationFunctionEnum;
+import com.alandevise.tsgate.model.AggregationSpec;
 import com.alandevise.tsgate.model.TSDBQuery;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -9,6 +11,8 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.List;
+import java.util.Locale;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -78,5 +82,60 @@ class TSDBQueryValidatorTest {
                 Arguments.of(100, null, 1L, null, false),
                 Arguments.of(10_001, 0, 1L, 2L, true),
                 Arguments.of(Integer.MAX_VALUE, null, null, null, false));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"aliases", "tag-alias", "tags", "window-tag", "window-alias"})
+    void rejectsCollidingAggregateOutputNames(String scenario) {
+        TSDBQuery query = aggregateQuery();
+        switch (scenario) {
+            case "aliases" -> query.getAggregations().add(new AggregationSpec("other", AggregationFunctionEnum.MAX, "total"));
+            case "tag-alias" -> query.setGroupByTags(List.of("total"));
+            case "tags" -> query.setGroupByTags(List.of("device", "device"));
+            case "window-tag" -> { query.setGroupByTime("1h"); query.setGroupByTags(List.of("window_start")); }
+            case "window-alias" -> {
+                query.setGroupByTime("1h");
+                query.setAggregations(List.of(new AggregationSpec("value", AggregationFunctionEnum.SUM, "window_start")));
+            }
+            default -> throw new AssertionError(scenario);
+        }
+        TSDBQuery original = query.copy();
+        TSDBException failure = assertThrows(TSDBException.class,
+                () -> TSDBQueryValidator.validateAggregationOutputNames(query, String::trim));
+        assertThat(failure.getErrorCode()).isEqualTo(TSDBErrorCodeEnum.ARGUMENT_ERROR);
+        assertThat(failure).hasMessageContaining("Duplicate aggregation output name");
+        assertThat(query).usingRecursiveComparison().isEqualTo(original);
+    }
+
+    @Test void physicalColumnIdentityControlsCaseSensitiveAggregateCollisions() {
+        TSDBQuery query = aggregateQuery();
+        query.getAggregations().add(new AggregationSpec("other", AggregationFunctionEnum.MAX, "TOTAL"));
+        TSDBQueryValidator.validateAggregationOutputNames(query, String::trim);
+        TSDBException failure = assertThrows(TSDBException.class, () -> TSDBQueryValidator.validateAggregationOutputNames(
+                query, column -> column.trim().toLowerCase(Locale.ROOT)));
+        assertThat(failure.getErrorCode()).isEqualTo(TSDBErrorCodeEnum.ARGUMENT_ERROR);
+    }
+
+    @Test void windowStartIsAvailableWhenNoWindowIsGeneratedAndDetailGroupingIsUnchanged() {
+        TSDBQuery query = aggregateQuery();
+        query.setAggregations(List.of(new AggregationSpec("value", AggregationFunctionEnum.SUM, "window_start")));
+        TSDBQueryValidator.validateAggregationOutputNames(query, String::trim);
+        query.setAggregations(List.of());
+        query.setGroupByTime("1h");
+        query.setGroupByTags(List.of("window_start", "window_start"));
+        TSDBQueryValidator.validateAggregationOutputNames(query, String::trim);
+    }
+
+    @Test void caseDistinctWindowAndTagOutputsRemainValidForQuotedIdentifiers() {
+        TSDBQuery query = aggregateQuery();
+        query.setGroupByTime("1h");
+        query.setGroupByTags(List.of("WINDOW_START", "TOTAL"));
+        TSDBQueryValidator.validateAggregationOutputNames(query, String::trim);
+    }
+
+    private static TSDBQuery aggregateQuery() {
+        TSDBQuery query = new TSDBQuery();
+        query.setAggregations(List.of(new AggregationSpec("value", AggregationFunctionEnum.SUM, "total")));
+        return query;
     }
 }

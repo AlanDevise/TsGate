@@ -78,6 +78,11 @@ public class OpenGeminiAdapter implements TSDBAdapter {
         copy.setPassword(source.getPassword());
         copy.setRetentionPolicy(source.getRetentionPolicy());
         copy.setMaxBatchRecords(source.getMaxBatchRecords());
+        copy.setMaxBatchBytes(source.getMaxBatchBytes());
+        if (copy.getMaxBatchBytes() <= 0) {
+            throw new TSDBException(TSDBErrorCodeEnum.CONFIGURATION_ERROR,
+                    "tsdb.opengemini.max-batch-bytes must be greater than 0");
+        }
         copy.setMaxQueryRows(source.getMaxQueryRows());
         copy.setMaxQueryResponseBytes(source.getMaxQueryResponseBytes());
         return copy;

@@ -3,13 +3,13 @@ package com.alandevise.tsgate.adapter.impl;
 import com.alandevise.tsgate.config.InfluxDB1HttpClientProperties;
 import com.alandevise.tsgate.config.InfluxDB1Properties;
 import com.alandevise.tsgate.contract.HttpSharedAdapterFixture;
-import com.alandevise.tsgate.contract.SharedAdapterContract;
+import com.alandevise.tsgate.contract.InfluxQlAggregateOutputContract;
 import com.alandevise.tsgate.contract.SharedAdapterFixture;
 
 import java.io.IOException;
 
 /** Executes the same public contract as every other backend, through its real HTTP adapter. */
-class InfluxDB1SharedAdapterContractTest implements SharedAdapterContract {
+class InfluxDB1SharedAdapterContractTest implements InfluxQlAggregateOutputContract {
     @Override
     public String backendId() { return "influxdb1"; }
 

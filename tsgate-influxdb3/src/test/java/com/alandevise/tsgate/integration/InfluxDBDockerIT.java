@@ -29,6 +29,51 @@ class InfluxDBDockerIT extends DatabaseContractIT {
         HttpRequest r=HttpRequest.newBuilder(URI.create(URL+path)).header("Content-Type","application/json").method(method,body==null?HttpRequest.BodyPublishers.noBody():HttpRequest.BodyPublishers.ofString(body)).build();
         HttpResponse<String> response=admin.send(r,HttpResponse.BodyHandlers.ofString()); assertTrue(response.statusCode()/100==2,response.statusCode()+" "+response.body());
     }
+    @Test void encodedBatchBudgetRejectsBeforeWritingAndAllowsConfiguredReadback() {
+        assertTrue(adapter.write(null, record(BASE, "existing", 1)));
+        initializeBatchBudget(1);
+        TSDBBatchWriteException failure = assertThrows(TSDBBatchWriteException.class,
+                () -> adapter.batchWriteDetailed(null, List.of(record(BASE + 1, "next", 2))));
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR, failure.getErrorCode());
+        assertEquals(BatchCommitStateEnum.NOT_COMMITTED, failure.getResult().commitState());
+        assertEquals(0, failure.getResult().committedRecords());
+        assertEquals(1, adapter.count(null, query()));
+        initializeBatchBudget(4096);
+        assertTrue(adapter.write(null, record(BASE + 1, "next", 2)));
+        assertEquals(2, rows(query()).size());
+    }
+
+    private void initializeBatchBudget(long bytes) {
+        adapter.close();
+        InfluxDBProperties config = new InfluxDBProperties();
+        config.setUrl(URL);
+        config.setDatabase(db);
+        config.setMaxBatchBytes(bytes);
+        config.setStrictCursorSql(StrictCursorSqlStrategyEnum.valueOf(System.getProperty(
+                "tsdb.it.influxdb.strict-cursor-sql", "OR").replace('-', '_').toUpperCase(Locale.ROOT)));
+        adapter = new InfluxDBAdapter(config, false);
+        adapter.init();
+        template = new TGTemplate(adapter);
+    }
+
+    @Test void aggregateOutputCollisionsFailWhileDistinctAliasesRoundTrip() {
+        assertTrue(adapter.batchWrite(null, List.of(record(BASE, "a", 1), record(BASE + 1, "b", 4))));
+        TSDBQuery query = query();
+        query.setAggregations(List.of(new AggregationSpec("value", AggregationFunctionEnum.MAX, "duplicate"),
+                new AggregationSpec("value", AggregationFunctionEnum.MIN, "duplicate")));
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.query(null, query)).getErrorCode());
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.count(null, query)).getErrorCode());
+        query.setAggregations(List.of(new AggregationSpec("value", AggregationFunctionEnum.MAX, "maximum"),
+                new AggregationSpec("value", AggregationFunctionEnum.MIN, "minimum")));
+        Map<String, Object> row = adapter.query(null, query).getRows().get(0);
+        assertEquals(4d, ((Number) row.get("maximum")).doubleValue());
+        assertEquals(1d, ((Number) row.get("minimum")).doubleValue());
+        assertEquals(1, adapter.count(null, query));
+        assertEquals(2, adapter.count(null, query()));
+    }
+
     @Test void lineProtocolRejectsNewlineBeforeCommittingAnyRow() {
         TSDBRecord invalid=new TSDBRecord("telemetry",BASE+1,Map.of("device","bad\ntag"),Map.of("value",1d));
         TSDBBatchWriteException error=assertThrows(TSDBBatchWriteException.class,()->adapter.batchWriteDetailed(null,List.of(record(BASE,"a",1),invalid)));

@@ -48,12 +48,17 @@ class OpenGeminiDockerIT {
     }
 
     void initialize(int rows, long bytes) {
+        initialize(rows, bytes, 64L * 1024 * 1024);
+    }
+
+    void initialize(int rows, long bytes, long batchBytes) {
         if (adapter != null) adapter.close();
         OpenGeminiProperties config = new OpenGeminiProperties();
         config.setUrl(URL);
         config.setDatabase(database);
         config.setMaxQueryRows(rows);
         config.setMaxQueryResponseBytes(bytes);
+        config.setMaxBatchBytes(batchBytes);
         OpenGeminiHttpClientProperties http = new OpenGeminiHttpClientProperties();
         http.setCallTimeoutMs(15000);
         adapter = new OpenGeminiAdapter(config, http, false);
@@ -101,6 +106,44 @@ class OpenGeminiDockerIT {
         assertEquals(VERSION, ping.headers().firstValue("X-Geminidb-Version").orElseThrow());
         assertTrue(adapter.getNativeClient().ping().isGood(), "Compatible health request failed for fixture " + VERSION);
         assertEquals("openGemini", adapter.getAdapterName());
+    }
+
+    @Test
+    void encodedBatchBudgetRejectsBeforeWritingAndAllowsConfiguredReadback() {
+        TSDBRecord first = point(base, "existing", 1d);
+        TSDBRecord second = point(base + 1, "next", 2d);
+        assertTrue(adapter.write(null, first));
+        awaitVisible(List.of(first));
+        initialize(10000, 16L * 1024 * 1024, 1);
+        TSDBBatchWriteException failure = assertThrows(TSDBBatchWriteException.class,
+                () -> adapter.batchWriteDetailed(null, List.of(second)));
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR, failure.getErrorCode());
+        assertEquals(BatchCommitStateEnum.NOT_COMMITTED, failure.getResult().commitState());
+        assertEquals(0, failure.getResult().committedRecords());
+        assertEquals(1, adapter.count(null, detail()));
+        initialize(10000, 16L * 1024 * 1024, 4096);
+        assertTrue(adapter.write(null, second));
+        awaitVisible(List.of(first, second));
+        assertEquals(2, adapter.query(null, detail()).getRowCount());
+    }
+
+    @Test
+    void aggregateOutputCollisionsFailWhileDistinctAliasesRoundTrip() {
+        seed();
+        TSDBQuery query = detail();
+        query.setAggregations(List.of(new AggregationSpec("value", AggregationFunctionEnum.MAX, "duplicate"),
+                new AggregationSpec("value", AggregationFunctionEnum.MIN, "duplicate")));
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.query(null, query)).getErrorCode());
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.count(null, query)).getErrorCode());
+        query.setAggregations(List.of(new AggregationSpec("value", AggregationFunctionEnum.MAX, "maximum"),
+                new AggregationSpec("value", AggregationFunctionEnum.MIN, "minimum")));
+        Map<String, Object> row = adapter.query(null, query).getRows().get(0);
+        assertEquals(4d, ((Number) row.get("maximum")).doubleValue());
+        assertEquals(1d, ((Number) row.get("minimum")).doubleValue());
+        assertEquals(1, adapter.count(null, query));
+        assertEquals(4, adapter.count(null, detail()));
     }
 
     @Test

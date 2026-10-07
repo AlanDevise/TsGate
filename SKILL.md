@@ -3,7 +3,7 @@ name: tsgate
 description: Integrate TsGate into Java applications or contribute to the TsGate adapter library. Use for TsGate dependencies, YAML activation, TG annotations and queries, backend compatibility, adapter fixes, new backends, tests, or release preparation. Apply only when the task uses or changes TsGate.
 license: Apache-2.0
 metadata:
-  tsgate-version: "2.1.1"
+  tsgate-version: "2.1.2"
   java-baseline: "17"
 ---
 
@@ -14,9 +14,9 @@ Use the workflow matching the request:
 - **Application integration:** configure and call an existing TsGate release in a business application.
 - **Library contribution:** change TsGate implementation, dependencies, tests, or documentation.
 
-This guide describes TsGate 2.1.1. Check the application's resolved dependencies or the repository's current POM before generating version-specific code. Read only the Wiki topics needed for the task. If a different version is in use, inspect its source/Javadoc instead of assuming identical APIs.
+This guide describes TsGate 2.1.2. Check the application's resolved dependencies or the repository's current POM before generating version-specific code. Read only the Wiki topics needed for the task. If a different version is in use, inspect its source/Javadoc instead of assuming identical APIs.
 
-TsGate 2.1.1 adds exact cursor-time validation, IoTDB column-identity preflight, shared backend contract tests and automatic Docker CI. It retains the existing OpenGemini, configuration-snapshot and startup-failure behavior. Version 2.1.1 is released on GitHub only; Maven Central remains at 2.1.0. Build and install the 2.1.1 source tag locally before resolving its Maven coordinates. See [release notes](https://github.com/AlanDevise/TsGate/wiki/EN-Release-Notes-2.1.1); local tests and GitHub releases do not imply Central publication.
+TsGate 2.1.2 prevents redirected HTTP writes from being reported as committed, rejects missing InfluxDB 3 query JSON, validates aggregation output names, bounds complete HTTP batch encoding, and caches read-result mapping plans. It retains the existing cursor validation, IoTDB column identity, shared contracts, Docker CI, OpenGemini and startup behavior. Version 2.1.2 is released on GitHub only; Maven Central remains at 2.1.0. Build and install the 2.1.2 source tag locally before resolving its Maven coordinates. See [release notes](https://github.com/AlanDevise/TsGate/wiki/EN-Release-Notes-2.1.2); local tests and GitHub releases do not imply Central publication.
 
 The repository publishes this file as a portable skill. To install it, put it in a `tsgate` skill directory recognized by the chosen coding assistant, or explicitly ask the assistant to read this file. A file at the repository root is not a guarantee of automatic discovery by every tool. A standalone copy uses the public Wiki links below; contribution commands require a TsGate source checkout.
 
@@ -26,22 +26,22 @@ The repository publishes this file as a portable skill. To install it, put it in
 
 Establish the server product/version, Java version, Spring Boot version, and required operations from the application. Ask only for information that affects the implementation and cannot be inferred from its build/configuration.
 
-- Maven groupId: `io.github.alandevise`; version documented here: `2.1.1`.
+- Maven groupId: `io.github.alandevise`; version documented here: `2.1.2`.
 - Java packages: `com.alandevise.tsgate.*`; Java 17 minimum, without preview features.
 
 
 - Select `tsgate-iotdb-spring-boot-starter`, `tsgate-influxdb3-spring-boot-starter`, `tsgate-influxdb1-spring-boot-starter`, or `tsgate-opengemini-spring-boot-starter`. Direct Java integration can use the matching adapter without a starter.
-- Import `tsgate-bom:2.1.1` explicitly when client dependency alignment is needed. A starter cannot override application dependency management. With multiple imported BOMs, follow the precedence and Boot-parent examples in [Getting started](https://github.com/AlanDevise/TsGate/wiki/EN-Getting-Started).
+- Import `tsgate-bom:2.1.2` explicitly when client dependency alignment is needed. A starter cannot override application dependency management. With multiple imported BOMs, follow the precedence and Boot-parent examples in [Getting started](https://github.com/AlanDevise/TsGate/wiki/EN-Getting-Started).
 - Select an IoTDB SDK through Maven/Gradle dependency management, not YAML. Inspect the resolved dependency tree and validate the SDK/server pair; do not equate client and server version numbers.
 - InfluxDB 3's Arrow client requires `--add-opens=java.base/java.nio=ALL-UNNAMED` at application launch. A library or BOM cannot supply that launcher option. InfluxDB 1.x and this OpenGemini HTTP adapter do not require it.
 
-For GitHub-only 2.1.1, first build the source checkout with `git checkout v2.1.1` and `mvn clean install -DskipTests`. This installs aligned modules and the BOM locally without publishing anything to Central. Then, for example, an InfluxDB 1.x starter dependency is:
+For GitHub-only 2.1.2, first build the source checkout with `git checkout v2.1.2` and `mvn clean install -DskipTests`. This installs aligned modules and the BOM locally without publishing anything to Central. Then, for example, an InfluxDB 1.x starter dependency is:
 
 ```xml
 <dependency>
     <groupId>io.github.alandevise</groupId>
     <artifactId>tsgate-influxdb1-spring-boot-starter</artifactId>
-    <version>2.1.1</version>
+    <version>2.1.2</version>
 </dependency>
 ```
 
@@ -107,7 +107,7 @@ public final class TsGateExample {
 }
 ```
 
-Writes are synchronous. For batches where commitment matters, use `batchWriteDetailed(...)` and inspect `BatchWriteResult`; failures can carry it in `TSDBBatchWriteException`. A batch spanning requests is not one transaction. An `UNKNOWN` commit state cannot justify blindly replaying writes. Read [Writes and errors](https://github.com/AlanDevise/TsGate/wiki/EN-Writes-and-Errors) before implementing retries.
+Writes are synchronous. For batches where commitment matters, use `batchWriteDetailed(...)` and inspect `BatchWriteResult`; failures can carry it in `TSDBBatchWriteException`. InfluxDB 1.x, InfluxDB 3 and OpenGemini bound the complete encoded batch with `max-batch-bytes` under their existing backend prefix (default 67,108,864 bytes / 64 MiB). This is separate from each physical HTTP payload limit and `max-batch-records`. Oversized batches fail before I/O with `ARGUMENT_ERROR` and `NOT_COMMITTED`; configure a positive byte budget for the workload. HTTP adapter clients do not follow redirects; configure the final database endpoint. A 3xx write failure retains an uncertain commit state and is not automatically replayed. A batch spanning requests is not one transaction. An `UNKNOWN` commit state cannot justify blindly replaying writes. Read [Writes and errors](https://github.com/AlanDevise/TsGate/wiki/EN-Writes-and-Errors) before implementing retries.
 
 ### OpenGemini integration
 
@@ -159,7 +159,10 @@ Keep dialect-specific behavior in its adapter and database-client dependencies o
 - Classify write failures by backend: InfluxDB 1.x HTTP 400 may partially persist and remains `UNKNOWN`; InfluxDB 3's definite-rejection rules depend on `accept_partial=false`. See [Writes and errors](https://github.com/AlanDevise/TsGate/wiki/EN-Writes-and-Errors). Distinguish application/adapter batch replay from the HTTP client's `retry-on-connection-failure` transport setting.
 - Snapshot complete adapter configuration at construction, including nested settings and endpoint lists. Do not read caller-owned mutable Properties during operations or recovery; configuration changes require a new instance.
 - Preserve idempotent initialization, retryable failed initialization, and terminal close. Close must coordinate with adapter operations; repeated IoTDB initialization must preserve the exposed native pool proxy. Native-client callers coordinate their own concurrent shutdown.
+- Reject colliding aggregation output names before I/O, including generated window columns, grouping tags and aliases. Compare names using the backend physical identity rules; keep case-distinct InfluxDB columns distinct. Native SQL remains caller-provided.
+- InfluxDB 3 query/count responses require valid JSON; a missing or blank body is `QUERY_ERROR`, while `[]` is a valid empty result.
 - Preserve exact backend column identity, complete cursor ordering, and pagination lookahead. Test equal timestamps, mixed sorts, case-distinct columns, missing cursor fields, and invalid time values when changing cursors.
+- Read mapping plans use a separate `ClassValue` from write metadata. Preserve unannotated DTO support, field matching priority, explicit NULL behavior and conversion errors; retain class-loader isolation. Measure mapping changes with the portable benchmark before claiming performance improvements.
 - Preserve exact numeric range checks, invalid-value errors, bounded result consumption, and real timezone transitions. Test boundary inputs relevant to the change rather than only happy paths.
 - Read existing error-code and resource-ownership contracts before replacing exceptions or exposing a native client. Keep public APIs and configuration behavior compatible unless the task explicitly calls for a breaking change.
 
@@ -208,7 +211,7 @@ For shared API or runtime/dependency changes, verify the relevant JDK/Spring Boo
 - Preserve Apache-2.0 for project-owned code, `NOTICE` attribution, and all applicable third-party notices. Generated Javadoc resources retain their own licenses.
 - Inspect the final diff and staged file list. Follow the task's authorization for commits, pushes, and releases; this skill does not authorize changing repository visibility, rewriting history, or publishing packages by itself.
 
-For release preparation, normally use PATCH for compatible fixes, MINOR for compatible additions, and MAJOR for breaking public contracts or supported baselines. Classify client upgrades by their actual effect on consumers. Keep module/BOM versions aligned, and never replace an already published Central version. Version 2.1.1 is a GitHub-only release; do not sign, upload or deploy it to Maven Central without a separate maintainer request.
+For release preparation, normally use PATCH for compatible fixes, MINOR for compatible additions, and MAJOR for breaking public contracts or supported baselines. Classify client upgrades by their actual effect on consumers. Keep module/BOM versions aligned, and never replace an already published Central version. Version 2.1.2 is a GitHub-only release; do not sign, upload or deploy it to Maven Central without a separate maintainer request.
 
 Build release artifacts with the documented Temurin 17 toolchain, then run the verifier:
 

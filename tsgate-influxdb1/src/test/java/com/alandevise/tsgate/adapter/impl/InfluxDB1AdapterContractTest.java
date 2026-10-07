@@ -437,10 +437,10 @@ class InfluxDB1AdapterContractTest {
         query.setStartTime(0L);
         query.setEndTime(1000L);
         query.setAggregations(List.of(new AggregationSpec("value", AggregationFunctionEnum.SUM, "window_start")));
-        assertEquals(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION, assertThrows(TSDBException.class, () -> adapter.query(null, query)).getErrorCode());
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR, assertThrows(TSDBException.class, () -> adapter.query(null, query)).getErrorCode());
         query.setAggregations(List.of(new AggregationSpec("value", AggregationFunctionEnum.SUM, "total")));
         query.setGroupByTags(List.of("window_start"));
-        assertEquals(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION, assertThrows(TSDBException.class, () -> adapter.query(null, query)).getErrorCode());
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR, assertThrows(TSDBException.class, () -> adapter.query(null, query)).getErrorCode());
         assertTrue(requests.isEmpty());
     }
 

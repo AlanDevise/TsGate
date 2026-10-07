@@ -86,6 +86,8 @@ final class OpenGeminiNativeClient implements InvocationHandler {
                 .readTimeout(configuration.readTimeoutMs, TimeUnit.MILLISECONDS)
                 .writeTimeout(configuration.writeTimeoutMs, TimeUnit.MILLISECONDS)
                 .callTimeout(configuration.callTimeoutMs, TimeUnit.MILLISECONDS)
+                .followRedirects(false)
+                .followSslRedirects(false)
                 .retryOnConnectionFailure(configuration.retryOnConnectionFailure)
                 .build();
         try {

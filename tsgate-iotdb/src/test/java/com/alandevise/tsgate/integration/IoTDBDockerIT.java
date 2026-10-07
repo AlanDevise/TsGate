@@ -32,6 +32,24 @@ class IoTDBDockerIT extends DatabaseContractIT {
         if(adapter!=null) adapter.close();
         if(admin!=null) { try { admin.executeNonQueryStatement("DROP DATABASE "+db); } finally { admin.close(); } }
     }
+    @Test void aggregateOutputCollisionsFailWhileDistinctAliasesRoundTrip() {
+        assertTrue(adapter.batchWrite(null, List.of(record(BASE, "a", 1), record(BASE + 1, "b", 4))));
+        TSDBQuery query = query();
+        query.setAggregations(List.of(new AggregationSpec("value", AggregationFunctionEnum.MAX, "duplicate"),
+                new AggregationSpec("value", AggregationFunctionEnum.MIN, "duplicate")));
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.query(null, query)).getErrorCode());
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.count(null, query)).getErrorCode());
+        query.setAggregations(List.of(new AggregationSpec("value", AggregationFunctionEnum.MAX, "maximum"),
+                new AggregationSpec("value", AggregationFunctionEnum.MIN, "minimum")));
+        Map<String, Object> row = adapter.query(null, query).getRows().get(0);
+        assertEquals(4d, ((Number) row.get("maximum")).doubleValue());
+        assertEquals(1d, ((Number) row.get("minimum")).doubleValue());
+        assertEquals(1, adapter.count(null, query));
+        assertEquals(2, adapter.count(null, query()));
+    }
+
     @Test void tabletChunkingReportsPhysicalBatches() {
         var result=adapter.batchWriteDetailed(null,java.util.stream.IntStream.range(0,7).mapToObj(i->record(BASE+i,"a",i)).toList());
         assertEquals(3,result.totalBatches()); assertEquals(7,result.committedRecords());

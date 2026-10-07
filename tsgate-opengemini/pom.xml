@@ -4,7 +4,7 @@
     <parent>
         <groupId>io.github.alandevise</groupId>
         <artifactId>tsgate</artifactId>
-        <version>2.1.1</version>
+        <version>2.1.2</version>
     </parent>
     <artifactId>tsgate-opengemini</artifactId>
     <name>tsgate-opengemini</name>
