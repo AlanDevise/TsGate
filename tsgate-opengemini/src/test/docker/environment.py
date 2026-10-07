@@ -321,6 +321,82 @@ def database_ready_partitions(log, database):
     return partitions
 
 
+# The official 1.4.1 binary drops Logger.With fields. Its exact source has only
+# two TransferLeadership callers: every successful init, and the logged RPC.
+# Count all calls and completions; never assign an anonymous finish to a DB.
+# Logger buffering and later background RPCs preclude an atomic health guarantee.
+# This observes initial CREATE transfers in an exclusive, serial test fixture.
+BINARY_141_COMMIT = '42678b4a23e0c7921548f6ceacb812659591d0bf'
+
+
+def database_readiness_141(log, database):
+    """Require a complete pinned-binary log and a balanced global transfer ledger."""
+    records = []
+    for line in log.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, TypeError) as error:
+            raise RuntimeError('Malformed or truncated 1.4.1 store log') from error
+        if not isinstance(record, dict):
+            raise RuntimeError('Malformed 1.4.1 store log record')
+        records.append(record)
+    startups = [i for i, record in enumerate(records) if record.get('msg') == 'TSStore starting']
+    if len(startups) != 1:
+        raise RuntimeError('1.4.1 readiness requires one complete, unrotated store process log')
+    startup = records[startups[0]]
+    if (startup.get('level') != 'info' or startup.get('version') != '1.4.1'
+            or startup.get('commit') != BINARY_141_COMMIT):
+        raise RuntimeError('1.4.1 readiness requires the pinned official binary commit')
+    sites = {
+        '[ASSIGN]init and start node': 'engine/engine_replication.go:83',
+        'Start TransferLeadership': 'handler/transfer_leader.go:44',
+        'try to transfer leadership finish': 'raftconn/node.go:313',
+    }
+    failures = {'[ASSIGN]InitAndStartNode failed', 'try to transfer leadership timeout',
+                'startRaftNode transferLeaderShip fail', 'TransferLeadership fail'}
+    started, finished = 0, 0
+    target = []
+    for index, record in enumerate(records):
+        message = record.get('msg')
+        if message in failures:
+            raise RuntimeError('1.4.1 data-Raft lifecycle failure: ' + message)
+        if message not in sites:
+            continue
+        if (index <= startups[0] or record.get('level') != 'info'
+                or record.get('location') != sites[message]):
+            raise RuntimeError('Unexpected or incomplete 1.4.1 data-Raft lifecycle record')
+        repeated = record.get('repeated')
+        if type(repeated) is not int or repeated < 1:
+            raise RuntimeError('Invalid 1.4.1 data-Raft repeated count')
+        if message == 'try to transfer leadership finish':
+            finished += repeated
+            continue
+        if not isinstance(record.get('db'), str) or not record['db']:
+            raise RuntimeError('Missing database in 1.4.1 data-Raft start record')
+        if message == '[ASSIGN]init and start node':
+            partition = record.get('pt')
+            if type(partition) is not int or partition not in (0, 1, 2):
+                raise RuntimeError('Invalid partition in 1.4.1 data-Raft init record')
+            if record['db'] == database:
+                if repeated != 1:
+                    raise RuntimeError('Ambiguous target database in repeated 1.4.1 init record')
+                target.append(partition)
+        else:
+            if any(type(record.get(key)) is not int or record[key] not in (0, 1, 2)
+                   for key in ('oldPt', 'newPt')):
+                raise RuntimeError('Invalid partition in 1.4.1 transfer RPC record')
+        started += repeated
+    if len(target) > 1:
+        raise RuntimeError('Ambiguous or restarted target database in 1.4.1 store log')
+    if finished > started:
+        raise RuntimeError('Incomplete 1.4.1 data-Raft transfer ledger')
+    ledger = {'started_transfers': started, 'finished_transfers': finished,
+              'pending_transfers': started - finished, 'target_partitions': target}
+    return set(target) if started == finished else set(), ledger
+
+
 def wait_database(state, database, timeout=45):
     """Wait for all owned database partitions without writing or transferring leadership."""
     if not isinstance(database, str) or not database.strip():
@@ -337,6 +413,9 @@ def wait_database(state, database, timeout=45):
             or not all(isinstance(name, str) and name.startswith(owner + '-node') for name in containers)
             or len(set(containers)) != 3 or state.get('ready') is not True or state.get('stopped')):
         raise RuntimeError('wait-database requires an active, ready, owned fixture')
+    version = state.get('version')
+    if version not in VERSIONS:
+        raise RuntimeError('wait-database requires an exact supported fixture version')
     deadline = time.monotonic() + timeout
 
     def remaining():
@@ -351,12 +430,17 @@ def wait_database(state, database, timeout=45):
                 or inspected[0].get('Config', {}).get('Labels', {}).get(LABEL) != owner):
             raise RuntimeError('Refusing to read a container with a different ownership label: ' + name)
     last = {}
+    previous_ledger = None
     while time.monotonic() < deadline:
         last = {}
+        ledgers = {}
         try:
             for name in containers:
                 result = docker('exec', name, 'cat', '/var/log/opengemini/store.log', timeout=remaining())
-                partitions = database_ready_partitions(result.stdout, database)
+                if version == '1.4.1':
+                    partitions, ledgers[name] = database_readiness_141(result.stdout, database)
+                else:
+                    partitions = database_ready_partitions(result.stdout, database)
                 if len(partitions) > 1:
                     raise RuntimeError('Ambiguous database partitions on owned node: ' + name)
                 last[name] = sorted(partitions)
@@ -364,8 +448,19 @@ def wait_database(state, database, timeout=45):
             if len(found) != len(set(found)):
                 raise RuntimeError('Database partition appears on more than one owned node: ' + repr(last))
             if len(found) == 3 and set(found) == {0, 1, 2}:
-                return {'database': database, 'mode': mode, 'status': 'ready', 'partitions': last}
+                if version != '1.4.1' or previous_ledger == ledgers:
+                    answer = {'database': database, 'mode': mode, 'version': version,
+                              'status': 'ready', 'partitions': last}
+                    if version == '1.4.1':
+                        answer.update(transfer_ledgers=ledgers, stable_observations=2)
+                    return answer
+                previous_ledger = ledgers
+            else:
+                previous_ledger = None
+            if ledgers:
+                last['transfer_ledgers'] = ledgers
         except subprocess.TimeoutExpired:
+            previous_ledger = None
             last['readTimeout'] = True
         delay = min(0.5, deadline - time.monotonic())
         if delay > 0:
