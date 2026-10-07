@@ -5,11 +5,12 @@ import com.alandevise.tsgate.config.OpenGeminiProperties;
 import com.alandevise.tsgate.contract.HttpSharedAdapterFixture;
 import com.alandevise.tsgate.contract.InfluxQlAggregateOutputContract;
 import com.alandevise.tsgate.contract.SharedAdapterFixture;
+import com.alandevise.tsgate.contract.SharedAdapterContract;
 
 import java.io.IOException;
 
 /** Exercises openGemini's actual wrapper and its explicitly unsupported optional operations. */
-class OpenGeminiSharedAdapterContractTest implements InfluxQlAggregateOutputContract {
+class OpenGeminiSharedAdapterContractTest implements SharedAdapterContract, InfluxQlAggregateOutputContract {
     @Override
     public String backendId() { return "opengemini"; }
 
