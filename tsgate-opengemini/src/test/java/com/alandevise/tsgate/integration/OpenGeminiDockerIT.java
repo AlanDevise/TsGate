@@ -17,7 +17,10 @@ import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.*;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
+import java.util.concurrent.TimeUnit;
 import java.time.Instant;
 import java.math.BigDecimal;
 import java.util.concurrent.locks.LockSupport;
@@ -44,7 +47,43 @@ class OpenGeminiDockerIT {
         base = System.currentTimeMillis() - 60_000;
         admin = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
         executeAdmin("CREATE DATABASE \"" + database + "\" REPLICAS " + REPLICAS);
+        awaitDatabaseRaft(database);
         initialize(10000, 16L * 1024 * 1024);
+    }
+
+    /** Waits for this owned test database's final data-Raft leader without writing any points. */
+    private static void awaitDatabaseRaft(String database) throws Exception {
+        int replicas = Integer.parseInt(System.getProperty("tsdb.it.opengemini.replicas", "1"));
+        String mode = System.getProperty("tsdb.it.opengemini.mode", replicas == 3 ? "cluster" : "single");
+        if ("single".equals(mode) && replicas == 1) return;
+        if (!"cluster".equals(mode) || replicas != 3) {
+            throw new IllegalStateException("The data-Raft gate requires a three-replica cluster fixture");
+        }
+        String script = System.getProperty("tsdb.it.opengemini.fixture.script");
+        String state = System.getProperty("tsdb.it.opengemini.fixture.state");
+        String python = System.getProperty("tsdb.it.opengemini.fixture.python", "python3");
+        if (script == null || state == null || python.isBlank()
+                || !Path.of(script).isAbsolute() || !Path.of(state).isAbsolute()
+                || !Files.isRegularFile(Path.of(script)) || !Files.isRegularFile(Path.of(state))) {
+            throw new IllegalStateException("Cluster integration tests require absolute fixture script and state properties");
+        }
+        Path output = Files.createTempFile("tsgate-database-raft-", ".log");
+        Process process = null;
+        try {
+            process = new ProcessBuilder(python, script, "wait-database", "--state", state, "--database", database)
+                    .redirectErrorStream(true).redirectOutput(output.toFile()).start();
+            if (!process.waitFor(70, TimeUnit.SECONDS)) {
+                throw new AssertionError("Database data-Raft gate exceeded 70 seconds: " + database);
+            }
+            assertEquals(0, process.exitValue(), Files.readString(output));
+        } finally {
+            if (process != null && process.isAlive()) {
+                process.descendants().forEach(ProcessHandle::destroyForcibly);
+                process.destroyForcibly();
+                process.waitFor(5, TimeUnit.SECONDS);
+            }
+            Files.deleteIfExists(output);
+        }
     }
 
     void initialize(int rows, long bytes) {

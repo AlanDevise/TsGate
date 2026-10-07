@@ -5,6 +5,7 @@
 Examples:
   python3 environment.py build --version 1.4.1 --state .local-test/og-141.json
   python3 environment.py start --version 1.4.1 --mode cluster --state .local-test/og-141.json
+  python3 environment.py wait-database --state .local-test/og-141.json --database test_points
   python3 environment.py inspect --state .local-test/og-141.json
   python3 environment.py stop --state .local-test/og-141.json
 
@@ -41,9 +42,9 @@ VERSIONS = {
     },
 }
 
-def docker(*args, check=True):
+def docker(*args, check=True, timeout=None):
     result = subprocess.run(['docker', *args], text=True, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE)
+                            stderr=subprocess.PIPE, timeout=timeout)
     if check and result.returncode:
         raise RuntimeError('docker ' + ' '.join(args) + ': ' + result.stderr.strip())
     return result
@@ -303,6 +304,75 @@ def start(args):
         save(args.state, state)
         raise
 
+def database_ready_partitions(log, database):
+    """Read only exact structured completion records for this database."""
+    partitions = set()
+    for line in log.splitlines():
+        try:
+            record = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if (isinstance(record, dict)
+                and record.get('msg') == 'try to transfer leadership finish'
+                and record.get('database') == database
+                and type(record.get('partition')) is int
+                and record['partition'] in (0, 1, 2)):
+            partitions.add(record['partition'])
+    return partitions
+
+
+def wait_database(state, database, timeout=45):
+    """Wait for all owned database partitions without writing or transferring leadership."""
+    if not isinstance(database, str) or not database.strip():
+        raise RuntimeError('wait-database requires a nonempty database name')
+    mode, replicas = state.get('mode'), state.get('replicas')
+    if mode == 'single' and type(replicas) is int and replicas == 1:
+        return {'database': database, 'mode': mode, 'status': 'skipped',
+                'reason': 'Single-node fixtures do not require the data-Raft gate'}
+    if mode != 'cluster' or type(replicas) is not int or replicas != 3:
+        raise RuntimeError('wait-database requires a three-replica cluster fixture')
+    owner, containers = state.get('owner'), state.get('containers')
+    if (not isinstance(owner, str) or not owner.startswith('tsgate-og-')
+            or not isinstance(containers, list) or len(containers) != 3
+            or not all(isinstance(name, str) and name.startswith(owner + '-node') for name in containers)
+            or len(set(containers)) != 3 or state.get('ready') is not True or state.get('stopped')):
+        raise RuntimeError('wait-database requires an active, ready, owned fixture')
+    deadline = time.monotonic() + timeout
+
+    def remaining():
+        seconds = deadline - time.monotonic()
+        if seconds <= 0:
+            raise RuntimeError('Database data-Raft readiness timeout: ' + database)
+        return min(seconds, 5)
+
+    for name in containers:
+        inspected = json.loads(docker('inspect', name, timeout=remaining()).stdout)
+        if (len(inspected) != 1
+                or inspected[0].get('Config', {}).get('Labels', {}).get(LABEL) != owner):
+            raise RuntimeError('Refusing to read a container with a different ownership label: ' + name)
+    last = {}
+    while time.monotonic() < deadline:
+        last = {}
+        try:
+            for name in containers:
+                result = docker('exec', name, 'cat', '/var/log/opengemini/store.log', timeout=remaining())
+                partitions = database_ready_partitions(result.stdout, database)
+                if len(partitions) > 1:
+                    raise RuntimeError('Ambiguous database partitions on owned node: ' + name)
+                last[name] = sorted(partitions)
+            found = [partitions[0] for partitions in last.values() if partitions]
+            if len(found) != len(set(found)):
+                raise RuntimeError('Database partition appears on more than one owned node: ' + repr(last))
+            if len(found) == 3 and set(found) == {0, 1, 2}:
+                return {'database': database, 'mode': mode, 'status': 'ready', 'partitions': last}
+        except subprocess.TimeoutExpired:
+            last['readTimeout'] = True
+        delay = min(0.5, deadline - time.monotonic())
+        if delay > 0:
+            time.sleep(delay)
+    raise RuntimeError('Database data-Raft readiness timeout: ' + database + '; partitions=' + repr(last))
+
+
 def collect(state, state_path):
     logs = state_path.parent / (state_path.stem + '-logs')
     logs.mkdir(parents=True, exist_ok=True)
@@ -336,17 +406,22 @@ def stop(state, state_path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('command', choices=('build', 'start', 'inspect', 'stop'))
+    parser.add_argument('command', choices=('build', 'start', 'inspect', 'stop', 'wait-database'))
     parser.add_argument('--version', choices=VERSIONS, default='1.4.1')
     parser.add_argument('--mode', choices=('single', 'cluster'), default='single')
     parser.add_argument('--state', type=Path, required=True)
     parser.add_argument('--force-build', action='store_true')
+    parser.add_argument('--database', help='Exact owned database whose data-Raft leader must be ready')
     args = parser.parse_args()
     args.state = args.state.resolve()
     if args.command == 'build':
         result = build(args.version, args.state, args.force_build)
     elif args.command == 'start':
         result = start(args)
+    elif args.command == 'wait-database':
+        if not args.database:
+            parser.error('wait-database requires --database')
+        result = wait_database(read_json(args.state), args.database)
     elif args.command == 'stop':
         result = stop(read_json(args.state), args.state)
     else:

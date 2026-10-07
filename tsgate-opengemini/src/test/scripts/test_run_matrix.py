@@ -34,7 +34,8 @@ class MatrixRunnerTest(unittest.TestCase):
     def state(self, version="1.4.1", mode="single"):
         return dict(owner="tsgate-og-unit", ready=True, actual_version=version, mode=mode,
                     url="http://127.0.0.1:18086", urls=["http://127.0.0.1:18086"],
-                    replicas=1 if mode == "single" else 3, containers=["recorded"])
+                    replicas=1 if mode == "single" else 3, containers=["recorded"],
+                    state_file=str(self.root / "state.json"))
 
     def write_state(self, path, state=None):
         path.write_text(json.dumps(state or self.state()))
@@ -66,7 +67,10 @@ class MatrixRunnerTest(unittest.TestCase):
                          "-Dfailsafe.failIfNoSpecifiedTests=false", "-Dtsdb.it.opengemini.replicas=3",
                          "-Dtsdb.it.opengemini.url=" + state["url"],
                          "-Dtsdb.it.opengemini.urls=" + ",".join(state["urls"]),
-                         "-Dtsdb.it.opengemini.version=1.5.2", "-o"):
+                         "-Dtsdb.it.opengemini.version=1.5.2", "-Dtsdb.it.opengemini.mode=cluster",
+                         "-Dtsdb.it.opengemini.fixture.script=" + str((self.root / "tsgate-opengemini/src/test/docker/environment.py").resolve()),
+                         "-Dtsdb.it.opengemini.fixture.state=" + str(Path(state["state_file"]).resolve()),
+                         "-Dtsdb.it.opengemini.fixture.python=" + matrix.sys.executable, "-o"):
             self.assertIn(argument, command)
 
     def test_reports_ignore_other_modules_and_read_actual_counts(self):

@@ -172,7 +172,11 @@ def maven_command(args, state, version):
                "-Dtsdb.it.opengemini.url=" + state["url"],
                "-Dtsdb.it.opengemini.urls=" + ",".join(state["urls"]),
                "-Dtsdb.it.opengemini.version=" + version,
-               "-Dtsdb.it.opengemini.replicas=" + str(state["replicas"])]
+               "-Dtsdb.it.opengemini.replicas=" + str(state["replicas"]),
+               "-Dtsdb.it.opengemini.mode=" + state["mode"],
+               "-Dtsdb.it.opengemini.fixture.script=" + str((ROOT / "tsgate-opengemini/src/test/docker/environment.py").resolve()),
+               "-Dtsdb.it.opengemini.fixture.state=" + str(Path(state["state_file"]).resolve()),
+               "-Dtsdb.it.opengemini.fixture.python=" + sys.executable]
     if args.maven_repo:
         command.append("-Dmaven.repo.local=" + str(args.maven_repo.resolve()))
     if args.offline:
