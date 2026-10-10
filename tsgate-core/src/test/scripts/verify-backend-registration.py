@@ -68,7 +68,7 @@ def body_end(items, start):
 
 def declarations(path):
     items = tokens(path.read_text(encoding="utf-8"))
-    package, imports, result = "", {}, []
+    package, imports, wildcard_imports, result = "", {}, set(), []
     index, prefix = 0, 0
     while index < len(items):
         token = items[index]
@@ -77,8 +77,11 @@ def declarations(path):
             name = "".join(items[index + 1:end])
             if token == "package":
                 package = name
-            elif not name.startswith("static") and not name.endswith("*"):
-                imports[name.rsplit(".", 1)[-1]] = name
+            elif not name.startswith("static"):
+                if name.endswith(".*"):
+                    wildcard_imports.add(name[:-2])
+                else:
+                    imports[name.rsplit(".", 1)[-1]] = name
             index, prefix = end + 1, end + 1
             continue
         if token in ("class", "interface", "enum", "record") and index + 1 < len(items) and (index == 0 or items[index - 1] != "."):
@@ -86,7 +89,8 @@ def declarations(path):
             opening = items.index("{", index)
             end = body_end(items, opening)
             result.append(dict(name=package + "." + name, simple=name, package=package,
-                               imports=imports.copy(), kind=token, signature=items[prefix:opening],
+                               imports=imports.copy(), wildcard_imports=tuple(wildcard_imports),
+                               kind=token, signature=items[prefix:opening],
                                body=items[opening + 1:end], path=path))
             index, prefix = end + 1, end + 1
         else:
@@ -171,6 +175,48 @@ def methods(declaration):
         else:
             index += 1
     return result
+
+
+def has_concrete_count(name, inventory, module=None, seen=None):
+    """Require the exact SPI operation on a class, including a source-visible superclass."""
+    declaration = type_for(inventory, name, module)
+    if declaration is None or declaration["kind"] != "class":
+        return False
+    identity = (declaration["module"], name)
+    seen = set() if seen is None else seen
+    if identity in seen:
+        return False
+    seen.add(identity)
+    for method in methods(declaration):
+        if method["name"] != "count":
+            continue
+        header = method["header"]
+        signature = next((index for index in range(len(header) - 1)
+                          if header[index:index + 2] == ["count", "("]), None)
+        if signature is None or signature == 0 or header[signature - 1] != "long":
+            continue
+        if "public" not in header[:signature] or "static" in header[:signature]:
+            continue
+        end = header.index(")", signature + 2)
+        parameters, start = [], signature + 2
+        for index in range(start, end + 1):
+            if index == end or header[index] == ",":
+                parameter = [token for token in header[start:index] if token != "final"]
+                parameters.append("".join(parameter[:-1]))
+                start = index + 1
+        if len(parameters) != 2 or parameters[0] not in ("String", "java.lang.String"):
+            continue
+        query_type = resolve(declaration, parameters[1])
+        if parameters[1] == "TSDBQuery" and "TSDBQuery" not in declaration["imports"] and (
+                "com.alandevise.tsgate.model" in declaration["wildcard_imports"]):
+            query_type = "com.alandevise.tsgate.model.TSDBQuery"
+        if query_type != "com.alandevise.tsgate.model.TSDBQuery":
+            continue
+        if has_sequence(method["body"], ["TSDBAdapter", ".", "super", ".", "count", "("]):
+            return False
+        return True
+    return any(has_concrete_count(parent, inventory, declaration["module"], seen)
+               for parent in parents(declaration))
 
 
 def method_body(declaration, name):
@@ -388,6 +434,8 @@ def verify(root=ROOT):
     selected_jobs, representative, matrix_selectors = set(), set(), set()
     for row in rows:
         identity = row["id"]
+        require(has_concrete_count(row["adapter"], production, row["module"]),
+                identity + ": adapter must implement count(String, TSDBQuery) instead of the SPI row-materializing fallback")
         require(row["module"] in jar_modules and row["starter"] in jar_modules,
                 identity + ": adapter/starter must be reactor JAR artifacts")
         profile = capabilities[identity]
@@ -451,6 +499,11 @@ def verify(root=ROOT):
                               and any(fnmatch.fnmatchcase(declaration["simple"], pattern) for pattern in patterns)
                               and has_test(declaration, tests)]
                 require(candidates, identity + ": selected Docker test missing for " + module)
+                if module == row["module"]:
+                    require(any(implements(candidate["name"],
+                                           "com.alandevise.tsgate.contract.BackendSemanticsContract", tests, module)
+                                for candidate in candidates),
+                            identity + ": selected adapter Docker test must inherit BackendSemanticsContract")
             require("tsgate-core/src/test/scripts/run-tests.py" in run_scripts(workflow[job])
                     and re.search(r"backend:\s*\$\{\{\s*fromJSON\(needs\.changes\.outputs\.docker\)", workflow[job]),
                     identity + ": CI does not execute the selected representative runner matrix")
@@ -470,6 +523,10 @@ def verify(root=ROOT):
                 require(test_type is not None and test_type["module"] == module
                         and "abstract" not in test_type["signature"] and has_test(test_type, tests),
                         identity + ": matrix Docker test missing for " + module)
+                if module == row["module"]:
+                    require(implements(test_type["name"],
+                                       "com.alandevise.tsgate.contract.BackendSemanticsContract", tests, module),
+                            identity + ": selected adapter Docker test must inherit BackendSemanticsContract")
             require(hasattr(matrix, "ENVIRONMENT") and Path(matrix.ENVIRONMENT).is_file(),
                     identity + ": deployment fixture is missing")
     require(representative == set(runner.BACKEND_TESTS) == set(scope.BACKENDS) == {server["kind"] for server in servers},

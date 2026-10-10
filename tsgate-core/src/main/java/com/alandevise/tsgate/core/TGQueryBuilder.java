@@ -284,6 +284,20 @@ public class TGQueryBuilder<T> {
     }
 
     /**
+     * Controls total result-row and total-page counting for offset pagination.
+     * <p>Defaults to true. False skips the count query and returns null for both totals;
+     * one extra result row determines whether another page exists. List queries and cursor
+     * pagination retain their existing behavior.</p>
+     *
+     * @param totalPageCount whether offset pages should count total rows and total pages
+     * @return this builder
+     */
+    public TGQueryBuilder<T> totalPageCount(boolean totalPageCount) {
+        this.query.setTotalPageCount(totalPageCount);
+        return this;
+    }
+
+    /**
      * Sets the offset for traditional limit/offset queries.
      *
      * @param offset rows to skip, for example {@code 200}
@@ -540,6 +554,7 @@ public class TGQueryBuilder<T> {
 
     /**
      * Executes a traditional limit/offset page query.
+     * <p>Total rows and total pages are counted unless {@link #totalPageCount(boolean)} is false.</p>
      *
      * @param pageNum  one-based page number, for example {@code 2}
      * @param pageSize rows per page, for example {@code 50}
@@ -554,6 +569,7 @@ public class TGQueryBuilder<T> {
 
     /**
      * Executes a traditional limit/offset page query and maps rows to the requested result type.
+     * <p>Total rows and total pages are counted unless {@link #totalPageCount(boolean)} is false.</p>
      *
      * @param pageNum    one-based page number, for example {@code 2}
      * @param pageSize   rows per page, for example {@code 50}

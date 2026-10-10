@@ -448,6 +448,100 @@ class TGTemplateTest {
         ordered.verify(adapter).query(eq("db"), any());
     }
 
+    @ParameterizedTest @ValueSource(ints = {0, 1, 2, 3})
+    void offsetPageWithoutTotalsUsesOneProbeAndKeepsPagingMetadata(int rowCount) {
+        List<Map<String, Object>> responseRows = new ArrayList<>();
+        for (int i = 0; i < rowCount; i++) {
+            responseRows.add(row(i + 5L, "device", i));
+        }
+        QueryResult response = rows();
+        response.setRows(responseRows);
+        response.setRowCount(rowCount);
+        when(adapter.query(eq("db"), any())).thenReturn(response);
+        PageResult<Point> page = template.query(Point.class).database("db")
+                .cursorTime(99L).cursor(Map.of("time", 99L)).orderByTimeAsc()
+                .totalPageCount(false).page(3, 2);
+
+        assertThat(page.getRows()).hasSize(Math.min(rowCount, 2));
+        assertThat(page.isHasNext()).isEqualTo(rowCount > 2);
+        assertThat(page.getTotal()).isNull();
+        assertThat(page.getTotalPages()).isNull();
+        assertThat(page.getPageNum()).isEqualTo(3);
+        assertThat(page.getPageSize()).isEqualTo(2);
+        assertThat(page.getLimit()).isEqualTo(2);
+        assertThat(page.getOffset()).isEqualTo(4);
+        assertThat(page.getOrder()).isEqualTo(SortOrderEnum.ASC);
+        assertThat(page.getNextCursor()).isEmpty();
+        assertThat(page.getNextCursorTime()).isNull();
+        TSDBQuery actual = capturedQuery();
+        assertThat(actual.getLimit()).isEqualTo(3);
+        assertThat(actual.getOffset()).isEqualTo(4);
+        assertThat(actual.isPaginationProbe()).isTrue();
+        assertThat(actual.isTotalPageCount()).isFalse();
+        assertThat(actual.isStrictCursor()).isFalse();
+        assertThat(actual.getCursorTime()).isNull();
+        assertThat(actual.getCursorValues()).isEmpty();
+        verify(adapter, never()).count(any(), any());
+    }
+
+    @Test void offsetPageWithoutTotalsTrimsTheSentinelBeforeMapping() {
+        when(adapter.query(isNull(), any())).thenReturn(rows(row(1L, "a", 1.0),
+                Map.of("time", 2L, "device_code", "b", "value", "invalid number")));
+        PageResult<Point> page = template.query(Point.class).totalPageCount(false).page(1, 1);
+        assertThat(page.getRows()).singleElement().satisfies(point -> assertThat(point.value).isEqualTo(1.0));
+        assertThat(page.isHasNext()).isTrue();
+        verify(adapter, never()).count(any(), any());
+    }
+
+    @Test void offsetPageWithoutTotalsSupportsTheMaximumPageSizeWithOneSentinel() {
+        QueryResult response = rows();
+        response.setRows(Collections.nCopies(10_001, row(1L, "a", 1.0)));
+        response.setRowCount(10_001);
+        when(adapter.query(isNull(), any())).thenReturn(response);
+        PageResult<Map> page = template.query(Point.class).totalPageCount(false).page(1, 10_000, Map.class);
+        assertThat(page.getRows()).hasSize(10_000);
+        assertThat(page.isHasNext()).isTrue();
+        assertThat(capturedQuery().getLimit()).isEqualTo(10_001);
+        assertThat(capturedQuery().isPaginationProbe()).isTrue();
+        verify(adapter, never()).count(any(), any());
+    }
+
+    @Test void totalCountingCanBeReenabledWithoutAffectingListsOrCursorPages() {
+        when(adapter.query(isNull(), any())).thenReturn(rows());
+        when(adapter.count(isNull(), any())).thenReturn(2L);
+        TGQueryBuilder<Point> builder = template.query(Point.class).limit(1).totalPageCount(false);
+        builder.page(2, 1);
+        builder.list();
+        builder.page();
+        builder.strictCursorPage();
+        PageResult<Point> counted = builder.totalPageCount(true).page(2, 1);
+
+        assertThat(counted.getTotal()).isEqualTo(2L);
+        assertThat(counted.getTotalPages()).isEqualTo(2L);
+        ArgumentCaptor<TSDBQuery> captured = ArgumentCaptor.forClass(TSDBQuery.class);
+        verify(adapter, times(5)).query(isNull(), captured.capture());
+        assertThat(captured.getAllValues()).extracting(TSDBQuery::isPaginationProbe)
+                .containsExactly(true, false, true, true, false);
+        assertThat(captured.getAllValues()).extracting(TSDBQuery::getLimit)
+                .containsExactly(2, 1, 2, 2, 1);
+        verify(adapter).count(isNull(), any());
+        assertThat(builder.build().isPaginationProbe()).isFalse();
+        assertThat(builder.build().getLimit()).isEqualTo(1);
+    }
+
+    @Test void offsetPageWithoutTotalsPreservesValidationAndQueryFailures() {
+        TGQueryBuilder<Point> builder = template.query(Point.class).totalPageCount(false);
+        assertThatThrownBy(() -> builder.page(0, 1)).isInstanceOf(TSDBException.class);
+        assertThatThrownBy(() -> builder.page(1, 0)).isInstanceOf(TSDBException.class);
+        assertThatThrownBy(() -> builder.page(1, 10_001)).isInstanceOf(TSDBException.class);
+        assertThatThrownBy(() -> builder.page(Integer.MAX_VALUE, 2)).isInstanceOf(TSDBException.class);
+        verify(adapter, never()).query(any(), any());
+        when(adapter.query(isNull(), any())).thenReturn(QueryResult.failure("offline"));
+        assertThat(assertThrows(TSDBException.class, () -> builder.page(1, 1)).getErrorCode())
+                .isEqualTo(TSDBErrorCodeEnum.QUERY_ERROR);
+        verify(adapter, never()).count(any(), any());
+    }
+
     @ParameterizedTest @ValueSource(longs = {0, 1, 2})
     void offsetPageBeyondTotalDoesNotPerformUnnecessaryQuery(long total) {
         when(adapter.count(isNull(), any())).thenReturn(total);

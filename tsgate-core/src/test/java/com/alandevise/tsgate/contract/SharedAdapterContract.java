@@ -14,6 +14,7 @@ import com.alandevise.tsgate.model.AggregationSpec;
 import com.alandevise.tsgate.model.BatchCommitStateEnum;
 import com.alandevise.tsgate.model.BatchWriteResult;
 import com.alandevise.tsgate.model.OperatorEnum;
+import com.alandevise.tsgate.model.PageResult;
 import com.alandevise.tsgate.model.QueryFilter;
 import com.alandevise.tsgate.model.QueryResult;
 import com.alandevise.tsgate.model.TSDBQuery;
@@ -236,6 +237,92 @@ public interface SharedAdapterContract {
             assertTrue(query.isStrictCursor());
             assertEquals(Map.of("unexpected", "cursor-only"), query.getCursorValues());
             assertEquals(1, fixture.ioCount());
+        }
+    }
+
+
+    @ParameterizedTest
+    @ValueSource(strings = {"detail", "grouped"})
+    default void sharedCountExceedsMaterializedRowLimitAndCountsGroupedResultRows(String shape) throws Exception {
+        try (SharedAdapterFixture fixture = createFixture()) {
+            fixture.initialize();
+            TSDBQuery query = detail();
+            query.setLimit(1);
+            query.setOffset(1);
+            if (shape.equals("grouped")) {
+                query.setGroupByTags(List.of("device"));
+                query.setAggregations(List.of(new AggregationSpec("value", AggregationFunctionEnum.SUM, "sum_value")));
+            }
+            int total = SharedAdapterFixture.ORIGINAL_MAX_QUERY_ROWS + 3;
+            fixture.enqueueCount(total);
+            assertEquals(total, fixture.adapter().count(null, query));
+            assertEquals(1, fixture.ioCount());
+            assertFalse(fixture.lastQuerySql().contains("LIMIT"), fixture.lastQuerySql());
+            assertFalse(fixture.lastQuerySql().contains("OFFSET"), fixture.lastQuerySql());
+            if (shape.equals("grouped")) {
+                assertTrue(fixture.lastQuerySql().contains("GROUP BY"), fixture.lastQuerySql());
+                assertEquals(List.of("device"), query.getGroupByTags());
+                assertEquals(List.of(new AggregationSpec("value", AggregationFunctionEnum.SUM, "sum_value")),
+                        query.getAggregations());
+            }
+            assertEquals(1, query.getLimit());
+            assertEquals(1, query.getOffset());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"null-item", "null-function", "null-field", "blank-field", "null-alias", "blank-alias"})
+    default void sharedMalformedAggregationsFailBeforeQueryAndCountIo(String scenario) throws Exception {
+        try (SharedAdapterFixture fixture = createFixture()) {
+            fixture.initialize();
+            AggregationSpec malformed = switch (scenario) {
+                case "null-item" -> null;
+                case "null-function" -> new AggregationSpec("value", null, "sum_value");
+                case "null-field" -> new AggregationSpec(null, AggregationFunctionEnum.SUM, "sum_value");
+                case "blank-field" -> new AggregationSpec(" ", AggregationFunctionEnum.SUM, "sum_value");
+                case "null-alias" -> new AggregationSpec("value", AggregationFunctionEnum.SUM, null);
+                case "blank-alias" -> new AggregationSpec("value", AggregationFunctionEnum.SUM, " ");
+                default -> throw new AssertionError(scenario);
+            };
+            TSDBQuery query = detail();
+            query.setAggregations(Arrays.asList(malformed));
+            assertError(TSDBErrorCodeEnum.ARGUMENT_ERROR, () -> fixture.adapter().query(null, query));
+            query.setLimit(0);
+            query.setOffset(-1);
+            query.setCursorTime(999L);
+            query.setStrictCursor(true);
+            query.setCursorValues(Map.of("unexpected", "count-only"));
+            assertError(TSDBErrorCodeEnum.ARGUMENT_ERROR, () -> fixture.adapter().count(null, query));
+            assertEquals(Arrays.asList(malformed), query.getAggregations());
+            assertEquals(0, query.getLimit());
+            assertEquals(-1, query.getOffset());
+            assertEquals(999L, query.getCursorTime());
+            assertTrue(query.isStrictCursor());
+            assertEquals(Map.of("unexpected", "count-only"), query.getCursorValues());
+            assertEquals(0, fixture.ioCount());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"detail", "grouped"})
+    default void sharedNoCountOffsetPageUsesOneQueryAndCropsItsSentinel(String shape) throws Exception {
+        try (SharedAdapterFixture fixture = createFixture()) {
+            fixture.initialize();
+            TGQueryBuilder<AggregateContractPoint> builder = new TGTemplate(fixture.adapter())
+                    .query(AggregateContractPoint.class).totalPageCount(false);
+            if (shape.equals("grouped")) {
+                builder.groupByTag("device").aggregate("value", AggregationFunctionEnum.SUM, "sum_value");
+            }
+            fixture.enqueueRows(1L, 2L);
+            PageResult<Map> page = builder.page(1, 1, Map.class);
+            assertEquals(1, page.getRows().size());
+            assertEquals(1L, page.getRows().get(0).get("time"));
+            assertTrue(page.isHasNext());
+            assertNull(page.getTotal());
+            assertNull(page.getTotalPages());
+            assertEquals(1, fixture.ioCount(), "Offset pagination with totals disabled must issue only its data query");
+            assertFalse(builder.build().isPaginationProbe(), "The caller's query must not retain the sentinel probe");
+            assertFalse(builder.build().isTotalPageCount());
         }
     }
 

@@ -14,6 +14,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -24,10 +25,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Exercises redirect handling and complete-batch byte budgets through a local HTTP peer. */
+/** Exercises redirects, write replay prevention, and complete-batch byte budgets through a local HTTP peer. */
 class InfluxDB1HttpSafetyTest {
     private HttpServer server;
     private InfluxDB1Adapter adapter;
@@ -37,7 +42,11 @@ class InfluxDB1HttpSafetyTest {
     private final Queue<Reply> replies = new ConcurrentLinkedQueue<>();
 
     private record CapturedRequest(String method, String path, byte[] body) { }
-    private record Reply(int status, String body, String location) { }
+    private record Reply(int status, String body, String location, String retryAfter) {
+        private Reply(int status, String body, String location) {
+            this(status, body, location, null);
+        }
+    }
 
     @BeforeEach
     void setup() throws Exception {
@@ -49,6 +58,11 @@ class InfluxDB1HttpSafetyTest {
             Reply reply = "/redirected".equals(exchange.getRequestURI().getPath())
                     ? new Reply(200, "<html>Not a write acknowledgement</html>", null) : replies.poll();
             if (reply == null) reply = new Reply(204, "", null);
+            if (reply.status() == -1) {
+                exchange.close();
+                return;
+            }
+            if (reply.retryAfter() != null) exchange.getResponseHeaders().set("Retry-After", reply.retryAfter());
             if (reply.location() != null) exchange.getResponseHeaders().set("Location", reply.location());
             byte[] body = reply.body().getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(reply.status(), reply.status() == 204 || body.length == 0 ? -1 : body.length);
@@ -59,7 +73,6 @@ class InfluxDB1HttpSafetyTest {
         properties = new InfluxDB1Properties();
         properties.setUrl("http://127.0.0.1:" + server.getAddress().getPort());
         http = new InfluxDB1HttpClientProperties();
-        http.setRetryOnConnectionFailure(false);
         adapter = newAdapter();
         adapter.init();
     }
@@ -77,6 +90,13 @@ class InfluxDB1HttpSafetyTest {
     private void setBudget(long bytes) {
         adapter.close();
         properties.setMaxBatchBytes(bytes);
+        adapter = newAdapter();
+        adapter.init();
+    }
+
+    private void setReadRecovery(boolean enabled) {
+        adapter.close();
+        http.setRetryOnConnectionFailure(enabled);
         adapter = newAdapter();
         adapter.init();
     }
@@ -99,6 +119,136 @@ class InfluxDB1HttpSafetyTest {
         assertEquals(0, error.getResult().totalBatches());
         assertEquals(0, error.getResult().committedBatches());
         assertTrue(requests.isEmpty(), "The entire batch must fail before the first HTTP write");
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {408, 503, -1})
+    void writeFailureNeverReplaysWithDefaultRecoverySettings(int status) {
+        replies.add(new Reply(status, "write failed", null, status == 503 ? "0" : null));
+        replies.add(new Reply(204, "", null));
+        TSDBBatchWriteException error = assertThrows(TSDBBatchWriteException.class,
+                () -> adapter.batchWriteDetailed(null, List.of(point(1, 1))));
+        assertEquals(TSDBErrorCodeEnum.BATCH_COMMIT_UNKNOWN, error.getErrorCode());
+        assertEquals(BatchCommitStateEnum.UNKNOWN, error.getResult().commitState());
+        assertTrue(error.getResult().retryable());
+        assertEquals(0, error.getResult().committedRecords());
+        assertEquals(0, error.getResult().committedBatches());
+        assertEquals(1, error.getResult().totalBatches());
+        assertEquals(1, requests.size());
+        assertEquals(1, replies.size(), "The write must not consume the response reserved for a replay");
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {408, 503, -1})
+    void laterWriteFailurePreservesConfirmedPrefixAndStopsRemainingBatches(int status) {
+        properties.setMaxBatchRecords(10_001);
+        setReadRecovery(true);
+        replies.add(new Reply(204, "", null));
+        replies.add(new Reply(status, "write failed", null, status == 503 ? "0" : null));
+        replies.add(new Reply(204, "", null));
+        TSDBBatchWriteException error = assertThrows(TSDBBatchWriteException.class,
+                () -> adapter.batchWriteDetailed(null, Collections.nCopies(10_001, point(1, 1))));
+        assertEquals(TSDBErrorCodeEnum.BATCH_COMMIT_UNKNOWN, error.getErrorCode());
+        assertEquals(BatchCommitStateEnum.UNKNOWN, error.getResult().commitState());
+        assertTrue(error.getResult().retryable());
+        assertEquals(5_000, error.getResult().committedRecords());
+        assertEquals(1, error.getResult().committedBatches());
+        assertEquals(3, error.getResult().totalBatches());
+        assertEquals(1, error.getResult().failedBatchIndex());
+        assertEquals(2, requests.size());
+        assertEquals(1, replies.size(), "No replay or remaining batch may be sent after the failure");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void queriesKeepConfiguredConnectionRecovery(boolean enabled) {
+        setReadRecovery(enabled);
+        replies.add(new Reply(408, "query timed out", null));
+        replies.add(new Reply(200, "{\"results\":[{}]}", null));
+        if (enabled) {
+            assertEquals(0, adapter.executeQuery("SELECT * FROM points").getRowCount());
+        } else {
+            TSDBException error = assertThrows(TSDBException.class,
+                    () -> adapter.executeQuery("SELECT * FROM points"));
+            assertEquals(TSDBErrorCodeEnum.CONNECTION_ERROR, error.getErrorCode());
+        }
+        assertEquals(enabled ? 2 : 1, requests.size());
+    }
+
+    @Test
+    void writeClientSharesOwnedResourcesAndKeepsIdentityUntilTerminalClose() {
+        setReadRecovery(true);
+        Object httpAdapter = adapter;
+        okhttp3.OkHttpClient readClient = (okhttp3.OkHttpClient) ReflectionTestUtils.getField(httpAdapter, "client");
+        okhttp3.OkHttpClient writeClient = (okhttp3.OkHttpClient) ReflectionTestUtils.getField(httpAdapter, "writeClient");
+        assertNotNull(readClient);
+        assertNotNull(writeClient);
+        assertTrue(readClient.retryOnConnectionFailure());
+        assertFalse(writeClient.retryOnConnectionFailure());
+        assertSame(readClient.connectionPool(), writeClient.connectionPool());
+        assertSame(readClient.dispatcher(), writeClient.dispatcher());
+        assertEquals(readClient.connectTimeoutMillis(), writeClient.connectTimeoutMillis());
+        assertEquals(readClient.readTimeoutMillis(), writeClient.readTimeoutMillis());
+        assertEquals(readClient.writeTimeoutMillis(), writeClient.writeTimeoutMillis());
+        assertEquals(readClient.callTimeoutMillis(), writeClient.callTimeoutMillis());
+        Object nativeClient = adapter.getNativeClient();
+        adapter.init();
+        assertSame(writeClient, ReflectionTestUtils.getField(httpAdapter, "writeClient"));
+        assertSame(nativeClient, adapter.getNativeClient());
+        adapter.close();
+        adapter.close();
+        assertNull(ReflectionTestUtils.getField(httpAdapter, "client"));
+        assertNull(ReflectionTestUtils.getField(httpAdapter, "writeClient"));
+        assertTrue(readClient.dispatcher().executorService().isShutdown());
+        assertEquals(0, readClient.connectionPool().connectionCount());
+        assertEquals(TSDBErrorCodeEnum.ADAPTER_STATE_ERROR,
+                assertThrows(TSDBException.class, () -> adapter.batchWriteDetailed(null, List.of(point(1, 1))))
+                        .getErrorCode());
+        assertThrows(TSDBException.class, adapter::init);
+    }
+
+    @Test
+    void closeWaitsForInFlightWriteBeforeClosingSharedResources() throws Exception {
+        CountDownLatch arrived = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch closing = new CountDownLatch(1);
+        server.removeContext("/");
+        server.createContext("/", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            arrived.countDown();
+            try {
+                if (!release.await(5, TimeUnit.SECONDS)) throw new java.io.IOException("Write release timed out");
+                exchange.sendResponseHeaders(204, -1);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new java.io.IOException(interrupted);
+            } finally {
+                exchange.close();
+            }
+        });
+        Object httpAdapter = adapter;
+        okhttp3.OkHttpClient readClient = (okhttp3.OkHttpClient) ReflectionTestUtils.getField(httpAdapter, "client");
+        assertNotNull(readClient);
+        var executor = Executors.newFixedThreadPool(2);
+        try {
+            var write = executor.submit(() -> adapter.batchWriteDetailed(null, List.of(point(1, 1))));
+            assertTrue(arrived.await(2, TimeUnit.SECONDS));
+            var close = executor.submit(() -> {
+                closing.countDown();
+                adapter.close();
+            });
+            assertTrue(closing.await(2, TimeUnit.SECONDS));
+            assertThrows(TimeoutException.class, () -> close.get(100, TimeUnit.MILLISECONDS));
+            assertFalse(readClient.dispatcher().executorService().isShutdown());
+            release.countDown();
+            assertTrue(write.get(2, TimeUnit.SECONDS).isSuccess());
+            close.get(2, TimeUnit.SECONDS);
+            assertTrue(readClient.dispatcher().executorService().isShutdown());
+            assertNull(ReflectionTestUtils.getField(httpAdapter, "writeClient"));
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
     }
 
     @ParameterizedTest

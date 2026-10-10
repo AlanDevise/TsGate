@@ -68,7 +68,8 @@ public class PageResult<T> {
     /**
      * Creates a traditional limit/offset page result.
      * <p>Retained for existing callers. Since no total count is supplied, {@link #getTotal()}
-     * and {@link #getTotalPages()} return {@code null}. The template uses the constructor that accepts a total count.</p>
+     * and {@link #getTotalPages()} return {@code null}. The template also uses this constructor
+     * when offset pagination disables total counting.</p>
      *
      * @param rows     current page rows, for example {@code List.of(result1, result2)}
      * @param hasNext  whether another page exists, for example {@code true}
@@ -261,9 +262,10 @@ public class PageResult<T> {
     /**
      * Returns the total result count for offset pagination.
      * <p>Detail queries count matching detail rows; aggregate or grouped queries count aggregate result rows.
-     * Cursor pagination does not run a count query and therefore returns {@code null}.</p>
+     * Cursor pagination and offset pagination with total counting disabled do not run a count query
+     * and therefore return {@code null}.</p>
      *
-     * @return total result rows, for example {@code 125L}, or {@code null} for cursor pagination
+     * @return total result rows, for example {@code 125L}, or {@code null} when total counting is disabled or omitted
      * @author Alan Zhang [initiator@alandevise.com]
      * @since 2026-08-25
      */
@@ -274,7 +276,7 @@ public class PageResult<T> {
     /**
      * Returns the total page count for offset pagination.
      *
-     * @return total pages, for example {@code 3L}, or {@code null} for cursor pagination
+     * @return total pages, for example {@code 3L}, or {@code null} when total counting is disabled or omitted
      * @author Alan Zhang [initiator@alandevise.com]
      * @since 2026-08-25
      */

@@ -447,6 +447,8 @@ public class TGTemplate {
 
     /**
      * Executes a traditional limit/offset page query.
+     * <p>Counts totals by default. When total counting is disabled, skips the count request,
+     * fetches one extra row to detect a following page, and returns null for both totals.</p>
      *
      * @param database   query database, for example {@code "tsdb"}; blank selects the adapter default
      * @param resultType result class, for example {@code ValueStatusResult.class}
@@ -490,6 +492,19 @@ public class TGTemplate {
         pageQuery.setLimit(requestedPageSize);
         pageQuery.setOffset(offset);
         TSDBAdapter queryAdapter = requireDefaultAdapter();
+        if (!pageQuery.isTotalPageCount()) {
+            pageQuery.setLimit(incrementForPageProbe(requestedPageSize));
+            pageQuery.setPaginationProbe(true);
+            QueryResult raw = queryAdapter.query(database, pageQuery);
+            ensureSuccess(raw);
+
+            List<Map<String, Object>> rows = safeRows(raw.getRows());
+            boolean hasNext = rows.size() > requestedPageSize;
+            List<Map<String, Object>> pageRows = trimPageRows(rows, requestedPageSize);
+            return new PageResult<>(mapRows(resultType, pageRows), hasNext,
+                    requestedPageNum, requestedPageSize, offset,
+                    SortOrderEnum.normalize(pageQuery.getOrder()));
+        }
         long total = queryAdapter.count(database, pageQuery);
         if (total < 0L) {
             throw new TSDBException(TSDBErrorCodeEnum.QUERY_ERROR,
@@ -857,8 +872,8 @@ public class TGTemplate {
     }
 
     /**
-     * Trims prefetched cursor results to the requested page size.
-     * <p>This method supports time-only cursors. If more than pageSize rows share a timestamp,
+     * Trims prefetched pagination results to the requested page size.
+     * <p>For time-only cursors, if more than pageSize rows share a timestamp,
      * later pages can skip remaining rows at that timestamp; callers should use {@code strictCursorPage()} instead.</p>
      *
      * @param rows  prefetched adapter rows, for example {@code List.of(row1, row2, row3)}

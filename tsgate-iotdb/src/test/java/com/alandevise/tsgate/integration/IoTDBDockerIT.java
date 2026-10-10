@@ -13,7 +13,23 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-class IoTDBDockerIT extends DatabaseContractIT {
+class IoTDBDockerIT extends DatabaseContractIT implements com.alandevise.tsgate.contract.BackendSemanticsContract {
+    @Override public com.alandevise.tsgate.adapter.TSDBAdapter semanticsAdapter() { return adapter; }
+    @Override public com.alandevise.tsgate.core.TGQueryBuilder<?> semanticsQuery() { return template.query(Telemetry.class); }
+    @Override public String semanticsMeasurement() { return "telemetry"; }
+    @Override public long semanticsTime() { return BASE; }
+    @Override public void awaitSemanticsVisibility(List<TSDBRecord> expected) {
+        // This RPC fixture tests acknowledged writes against the configured IoTDB server version.
+    }
+    @Override public void configureSemanticsRowLimit(int rows) {
+        adapter.close();
+        IoTDBProperties properties = config(db);
+        properties.setMaxQueryRows(rows);
+        adapter = new IoTDBTableAdapter(properties, properties.getPool(), false);
+        adapter.init();
+        template = new TGTemplate(adapter);
+    }
+
     ITableSession admin;
     static final String ENDPOINT=System.getProperty("tsdb.it.iotdb.endpoint","127.0.0.1:16667");
     @BeforeEach void setup() throws Exception {

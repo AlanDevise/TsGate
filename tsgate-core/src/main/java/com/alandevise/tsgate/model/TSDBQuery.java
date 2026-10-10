@@ -77,9 +77,18 @@ public class TSDBQuery {
     private Integer limit;
 
     /**
-     * Whether this query includes one extra cursor-pagination row used only to detect a following page.
-     * Defaults to false. The template enables it only after increasing a cursor page's limit;
-     * ordinary lists, offset pages, and count queries do not receive the extra row allowance.
+     * Whether offset pagination should count total result rows and total pages.
+     * Defaults to true. False skips the count query and leaves both totals null;
+     * list queries and cursor pagination are unaffected.
+     */
+    @Setter
+    private boolean totalPageCount = true;
+
+    /**
+     * Whether this query includes one extra pagination row used only to detect a following page.
+     * Defaults to false. The template enables it only after increasing a cursor page's limit
+     * or an offset page's limit when total counting is disabled. Ordinary lists, offset pages
+     * with total counting enabled, and count queries do not receive the extra row allowance.
      */
     @Setter
     private boolean paginationProbe;
@@ -266,6 +275,7 @@ public class TSDBQuery {
         copy.setCursorColumns(cursorColumns);
         copy.setCursorValues(cursorValues);
         copy.setLimit(limit);
+        copy.setTotalPageCount(totalPageCount);
         copy.setPaginationProbe(paginationProbe);
         copy.setOffset(offset);
         copy.setOrder(order);

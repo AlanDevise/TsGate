@@ -26,6 +26,17 @@ class TGQueryBuilderTest {
         assertThat(query.getOrder()).isEqualTo(SortOrderEnum.DESC);
     }
 
+    @Test void totalPageCountingDefaultsToTrueAndSnapshotsRetainTheirOwnSetting() {
+        TGQueryBuilder<?> builder = builder();
+        assertThat(builder.build().isTotalPageCount()).isTrue();
+        assertThat(builder.totalPageCount(false)).isSameAs(builder);
+        TSDBQuery disabled = builder.build();
+        assertThat(disabled.isTotalPageCount()).isFalse();
+        builder.totalPageCount(true);
+        assertThat(builder.build().isTotalPageCount()).isTrue();
+        assertThat(disabled.isTotalPageCount()).isFalse();
+    }
+
     @Test void selectFiltersBlankNamesAndCopiesCallerCollection() {
         List<String> columns = new ArrayList<>(Arrays.asList(" value ", "", null, "device_code"));
         TGQueryBuilder<?> builder = builder().select(columns);

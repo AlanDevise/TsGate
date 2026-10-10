@@ -35,7 +35,7 @@ class RegistrationTest(unittest.TestCase):
         self.write(root, "tsgate-bom/pom.xml", '<project xmlns="http://maven.apache.org/POM/4.0.0"><artifactId>tsgate-bom</artifactId><packaging>pom</packaging><dependencyManagement><dependencies>' + ''.join(
             '<dependency><groupId>io.github.alandevise</groupId><artifactId>' + module + '</artifactId></dependency>' for module in ("tsgate-core", adapter_module, starter)) + '</dependencies></dependencyManagement></project>')
         source = adapter_module + "/src/main/java/example/"
-        self.write(root, source + "FutureAdapter.java", 'package example; import com.alandevise.tsgate.adapter.TSDBAdapter; public class FutureAdapter implements TSDBAdapter {}')
+        self.write(root, source + "FutureAdapter.java", 'package example; import com.alandevise.tsgate.adapter.TSDBAdapter; public class FutureAdapter implements TSDBAdapter { public long count(String database, com.alandevise.tsgate.model.TSDBQuery query) { return 0L; } }')
         self.write(root, source + "FutureProperties.java", 'package example; @ConfigurationProperties(prefix="tsdb.future") public class FutureProperties {}')
         self.write(root, CHECK.CONDITION, '''package com.alandevise.tsgate.config;
           public class TSDBAdapterEnabledCondition {
@@ -59,8 +59,9 @@ class RegistrationTest(unittest.TestCase):
           }''')
         self.write(root, starter + "/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports", "example.FutureAutoConfiguration\n")
         self.write(root, "tsgate-core/src/test/java/com/alandevise/tsgate/contract/SharedAdapterContract.java", 'package com.alandevise.tsgate.contract; public interface SharedAdapterContract { @Test default void shared() {} }')
+        self.write(root, "tsgate-core/src/test/java/com/alandevise/tsgate/contract/BackendSemanticsContract.java", 'package com.alandevise.tsgate.contract; public interface BackendSemanticsContract { @Test default void semantics() {} }')
         self.write(root, adapter_module + "/src/test/java/example/FutureSharedTest.java", 'package example; import com.alandevise.tsgate.contract.SharedAdapterContract; class FutureSharedTest implements SharedAdapterContract {}')
-        self.write(root, adapter_module + "/src/test/java/example/FutureDockerIT.java", 'package example; class FutureDockerIT { @Test void roundTrip() {} }')
+        self.write(root, adapter_module + "/src/test/java/example/FutureDockerIT.java", 'package example; import com.alandevise.tsgate.contract.BackendSemanticsContract; class FutureDockerIT implements BackendSemanticsContract { @Test void roundTrip() {} }')
         self.write(root, starter + "/src/test/java/example/FutureStarterDockerIT.java", 'package example; class FutureStarterDockerIT { @Test void startup() {} }')
         self.write(root, CHECK.CAPABILITIES, 'backend,module,contractTest,BATCH_WRITE\nfuturedb,tsgate-futuredb,example.FutureSharedTest,SUPPORTED\n')
         row = dict(id="futuredb", module=adapter_module, adapter="example.FutureAdapter", enableId="future",
@@ -148,7 +149,7 @@ jobs:
             ("template bean", "tsgate-futuredb-spring-boot-starter/src/main/java/example/FutureAutoConfiguration.java", '@Bean public TGTemplate', 'public TGTemplate'),
             ("properties binding", "tsgate-futuredb-spring-boot-starter/src/main/java/example/FutureAutoConfiguration.java", '@Bean public FutureProperties', 'public FutureProperties'),
             ("shared contract", "tsgate-futuredb/src/test/java/example/FutureSharedTest.java", 'implements SharedAdapterContract', '/* implements SharedAdapterContract */'),
-            ("Docker adapter test", "tsgate-futuredb/src/test/java/example/FutureDockerIT.java", '@Test', '/* @Test */'),
+            ("Docker adapter test", "tsgate-futuredb/src/test/java/example/FutureDockerIT.java", 'class FutureDockerIT implements BackendSemanticsContract { @Test void roundTrip() {} }', 'class FutureDockerIT {}'),
             ("Docker starter test", "tsgate-futuredb-spring-boot-starter/src/test/java/example/FutureStarterDockerIT.java", '@Test', ''),
             ("Docker server", "tsgate-core/src/test/resources/ci/docker-servers.json", '"kind":"future"', '"kind":"other"'),
             ("runner", "tsgate-core/src/test/scripts/run-tests.py", '"future":"Future*DockerIT"', '"other":"OtherDockerIT"'),
@@ -166,6 +167,36 @@ jobs:
                 with self.assertRaises((ValueError, KeyError, CHECK.ET.ParseError)):
                     CHECK.verify(root)
 
+    def test_selected_adapter_docker_test_requires_semantic_acceptance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            self.mutate(root, "tsgate-futuredb/src/test/java/example/FutureDockerIT.java",
+                        'implements BackendSemanticsContract', '')
+            with self.assertRaisesRegex(ValueError, "selected adapter Docker test must inherit BackendSemanticsContract"):
+                CHECK.verify(root)
+
+    def test_selected_adapter_can_inherit_semantic_acceptance_from_abstract_base(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            self.write(root, "tsgate-futuredb/src/test/java/example/SemanticBase.java",
+                       'package example; import com.alandevise.tsgate.contract.BackendSemanticsContract; abstract class SemanticBase implements BackendSemanticsContract {}')
+            self.write(root, "tsgate-futuredb/src/test/java/example/FutureDockerIT.java",
+                       'package example; class FutureDockerIT extends SemanticBase {}')
+            self.assertEqual("passed", CHECK.verify(root)["status"])
+
+    def test_unselected_docker_semantic_test_does_not_satisfy_runner_acceptance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            self.mutate(root, "tsgate-futuredb/src/test/java/example/FutureDockerIT.java",
+                        'implements BackendSemanticsContract', '')
+            self.write(root, "tsgate-futuredb/src/test/java/example/UnselectedSemanticsDockerIT.java",
+                       'package example; import com.alandevise.tsgate.contract.BackendSemanticsContract; class UnselectedSemanticsDockerIT implements BackendSemanticsContract {}')
+            with self.assertRaisesRegex(ValueError, "selected adapter Docker test must inherit BackendSemanticsContract"):
+                CHECK.verify(root)
+
     def test_new_concrete_adapter_cannot_hide_without_a_manifest_entry(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -179,10 +210,48 @@ jobs:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.fixture(root)
-            self.write(root, "tsgate-futuredb/src/main/java/example/BaseAdapter.java", 'package example; import com.alandevise.tsgate.adapter.TSDBAdapter; public abstract class BaseAdapter implements TSDBAdapter {}')
+            self.write(root, "tsgate-futuredb/src/main/java/example/BaseAdapter.java", 'package example; import com.alandevise.tsgate.adapter.TSDBAdapter; public abstract class BaseAdapter implements TSDBAdapter { public long count(String database, com.alandevise.tsgate.model.TSDBQuery query) { return 0L; } }')
             self.mutate(root, "tsgate-futuredb/src/main/java/example/FutureAdapter.java", 'implements TSDBAdapter', 'extends BaseAdapter')
+            self.mutate(root, "tsgate-futuredb/src/main/java/example/FutureAdapter.java", 'public long count(String database, com.alandevise.tsgate.model.TSDBQuery query) { return 0L; }', '')
             self.write(root, "tsgate-futuredb/src/test/java/example/FutureContract.java", 'package example; import com.alandevise.tsgate.contract.SharedAdapterContract; interface FutureContract extends SharedAdapterContract {}')
             self.mutate(root, "tsgate-futuredb/src/test/java/example/FutureSharedTest.java", 'implements SharedAdapterContract', 'implements FutureContract')
+            self.assertEqual("passed", CHECK.verify(root)["status"])
+
+
+    def test_count_fallback_overloads_static_and_spi_delegation_are_rejected(self):
+        count = 'public long count(String database, com.alandevise.tsgate.model.TSDBQuery query) { return 0L; }'
+        replacements = (
+            '',
+            'public long count(String database) { return 0L; }',
+            'public static long count(String database, com.alandevise.tsgate.model.TSDBQuery query) { return 0L; }',
+            'public int count(String database, com.alandevise.tsgate.model.TSDBQuery query) { return 0; }',
+            'public long count(String database, com.alandevise.tsgate.model.TSDBQuery query) { return TSDBAdapter.super.count(database, query); }',
+        )
+        for replacement in replacements:
+            with self.subTest(count=replacement), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.fixture(root)
+                self.mutate(root, "tsgate-futuredb/src/main/java/example/FutureAdapter.java", count, replacement)
+                with self.assertRaisesRegex(ValueError, "must implement count"):
+                    CHECK.verify(root)
+
+    def test_interface_count_default_does_not_replace_a_backend_count_implementation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            self.write(root, "tsgate-futuredb/src/main/java/example/CountingAdapter.java",
+                       'package example; import com.alandevise.tsgate.adapter.TSDBAdapter; public interface CountingAdapter extends TSDBAdapter { default long count(String database, com.alandevise.tsgate.model.TSDBQuery query) { return 0L; } }')
+            self.write(root, "tsgate-futuredb/src/main/java/example/FutureAdapter.java",
+                       'package example; public class FutureAdapter implements CountingAdapter {}')
+            with self.assertRaisesRegex(ValueError, "must implement count"):
+                CHECK.verify(root)
+
+    def test_count_accepts_imported_types_and_final_parameters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            self.write(root, "tsgate-futuredb/src/main/java/example/FutureAdapter.java",
+                       'package example; import com.alandevise.tsgate.adapter.TSDBAdapter; import com.alandevise.tsgate.model.TSDBQuery; public class FutureAdapter implements TSDBAdapter { @Override public long count(final java.lang.String database, final TSDBQuery query) { return 0L; } }')
             self.assertEqual("passed", CHECK.verify(root)["status"])
 
     def test_unused_java_methods_do_not_count_as_registration(self):

@@ -35,7 +35,8 @@ public class InfluxDB1HttpClientProperties {
      */
     private long callTimeoutMs = 0L;
     /**
-     * Enables OkHttp recovery from eligible connection failures; defaults to true, without guaranteeing write idempotency.
+     * Enables OkHttp connection recovery for adapter reads and borrowed native operations; defaults to true.
+     * Unified adapter writes never replay automatically, regardless of this setting.
      */
     private boolean retryOnConnectionFailure = true;
 }

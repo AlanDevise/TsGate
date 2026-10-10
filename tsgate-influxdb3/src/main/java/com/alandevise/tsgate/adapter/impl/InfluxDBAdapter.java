@@ -38,6 +38,7 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
+import okio.BufferedSink;
 
 import java.io.IOException;
 import java.io.FilterInputStream;
@@ -92,6 +93,7 @@ public class InfluxDBAdapter implements TSDBAdapter {
     private final ReentrantReadWriteLock lifecycleLock = new ReentrantReadWriteLock(true);
     private LifecycleState state = LifecycleState.NEW;
     private OkHttpClient client;
+    private OkHttpClient writeClient;
     private InfluxDBClient nativeClient;
 
     /**
@@ -200,8 +202,11 @@ public class InfluxDBAdapter implements TSDBAdapter {
                         "InfluxDB adapter is closed and cannot be reinitialized");
             }
             newClient = buildHttpClient();
+            // Both HTTP views share resources; the read client remains their sole cleanup owner.
+            OkHttpClient newWriteClient = newClient.newBuilder().retryOnConnectionFailure(false).build();
             newNativeClient = buildNativeClient();
             client = newClient;
+            writeClient = newWriteClient;
             nativeClient = newNativeClient;
             state = LifecycleState.READY;
             log.info("InfluxDB 3 Core client resources initialized, url: {}, database: {}; "
@@ -243,6 +248,7 @@ public class InfluxDBAdapter implements TSDBAdapter {
             OkHttpClient oldClient = client;
             nativeClient = null;
             client = null;
+            writeClient = null;
             closeResources(oldNativeClient, oldClient);
         } finally {
             lifecycleLock.writeLock().unlock();
@@ -306,6 +312,7 @@ public class InfluxDBAdapter implements TSDBAdapter {
 
     /**
      * Writes a batch of unified records, encoding each record as one line of line protocol.
+     * Adapter writes never replay automatically; callers decide whether to retry using an idempotency strategy.
      *
      * @param database target database, for example {@code "tsdb"}; blank uses the configured default
      * @param records  unified records, for example {@code List.of(record1, record2)}
@@ -487,6 +494,32 @@ public class InfluxDBAdapter implements TSDBAdapter {
         return batches;
     }
 
+    /** Prevents status-code follow-ups, including HTTP 503 with Retry-After: 0, from replaying a write. */
+    private static RequestBody singleAttemptWriteBody(String payload) {
+        RequestBody delegate = RequestBody.create(payload, LINE_PROTOCOL);
+        return new RequestBody() {
+            @Override
+            public MediaType contentType() {
+                return delegate.contentType();
+            }
+
+            @Override
+            public long contentLength() throws IOException {
+                return delegate.contentLength();
+            }
+
+            @Override
+            public boolean isOneShot() {
+                return true;
+            }
+
+            @Override
+            public void writeTo(BufferedSink sink) throws IOException {
+                delegate.writeTo(sink);
+            }
+        };
+    }
+
     /**
      * Writes one bounded line protocol payload.
      *
@@ -498,9 +531,9 @@ public class InfluxDBAdapter implements TSDBAdapter {
     private void writePayload(HttpUrl url, String payload) {
         Request request = authorize(new Request.Builder()
                 .url(url)
-                .post(RequestBody.create(payload, LINE_PROTOCOL)))
+                .post(singleAttemptWriteBody(payload)))
                 .build();
-        try (Response response = client.newCall(request).execute()) {
+        try (Response response = writeClient.newCall(request).execute()) {
             if (response.isSuccessful()) {
                 return;
             }

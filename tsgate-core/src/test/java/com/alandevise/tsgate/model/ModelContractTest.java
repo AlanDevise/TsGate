@@ -21,6 +21,16 @@ class ModelContractTest {
         assertThat(original.isPaginationProbe()).isTrue();
     }
 
+    @Test void querySnapshotPreservesDisabledTotalCountingWithoutMutatingTheSource() {
+        TSDBQuery original = new TSDBQuery();
+        assertThat(original.isTotalPageCount()).isTrue();
+        original.setTotalPageCount(false);
+        TSDBQuery copy = original.copy();
+        assertThat(copy.isTotalPageCount()).isFalse();
+        copy.setTotalPageCount(true);
+        assertThat(original.isTotalPageCount()).isFalse();
+    }
+
     @Test void recordMapsAreDefensiveImmutableCopiesThatPreserveOrder() {
         Map<String, String> tags = new LinkedHashMap<>(); tags.put("device", "a"); tags.put("region", "east");
         Map<String, Object> fields = new LinkedHashMap<>(); fields.put("value", 2.5); fields.put("quality", true);

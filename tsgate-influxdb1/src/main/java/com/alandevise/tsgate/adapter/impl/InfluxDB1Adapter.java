@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.*;
+import okio.BufferedSink;
 import org.influxdb.InfluxDB;
 import org.influxdb.InfluxDBFactory;
 
@@ -63,6 +64,7 @@ public class InfluxDB1Adapter implements TSDBAdapter {
     private final ReentrantReadWriteLock lifecycleLock = new ReentrantReadWriteLock(true);
     private LifecycleState state = LifecycleState.NEW;
     private OkHttpClient client;
+    private OkHttpClient writeClient;
     private InfluxDB nativeClient;
 
     private enum LifecycleState {NEW, READY, CLOSED}
@@ -167,12 +169,15 @@ public class InfluxDB1Adapter implements TSDBAdapter {
             if (state == LifecycleState.READY) return;
             if (state == LifecycleState.CLOSED) throw stateError();
             createdHttp = httpBuilder().build();
+            // Both HTTP views share resources; the read client remains their sole cleanup owner.
+            OkHttpClient createdWriteHttp = createdHttp.newBuilder().retryOnConnectionFailure(false).build();
             createdNative = isBlank(config.getUsername())
                     ? InfluxDBFactory.connect(config.getUrl(), httpBuilder())
                     : InfluxDBFactory.connect(config.getUrl(), config.getUsername(), config.getPassword(), httpBuilder());
             createdNative.setDatabase(config.getDatabase());
             if (!isBlank(config.getRetentionPolicy())) createdNative.setRetentionPolicy(config.getRetentionPolicy());
             client = createdHttp;
+            writeClient = createdWriteHttp;
             nativeClient = createdNative;
             state = LifecycleState.READY;
         } catch (RuntimeException | Error e) {
@@ -198,6 +203,7 @@ public class InfluxDB1Adapter implements TSDBAdapter {
             OkHttpClient oldHttp = client;
             nativeClient = null;
             client = null;
+            writeClient = null;
             closeResources(oldNative, oldHttp);
         } finally {
             lifecycleLock.writeLock().unlock();
@@ -731,9 +737,35 @@ public class InfluxDB1Adapter implements TSDBAdapter {
         return request;
     }
 
+    /** Prevents status-code follow-ups, including HTTP 503 with Retry-After: 0, from replaying a write. */
+    private static RequestBody singleAttemptWriteBody(String payload) {
+        RequestBody delegate = RequestBody.create(payload, LINE_PROTOCOL);
+        return new RequestBody() {
+            @Override
+            public MediaType contentType() {
+                return delegate.contentType();
+            }
+
+            @Override
+            public long contentLength() throws IOException {
+                return delegate.contentLength();
+            }
+
+            @Override
+            public boolean isOneShot() {
+                return true;
+            }
+
+            @Override
+            public void writeTo(BufferedSink sink) throws IOException {
+                delegate.writeTo(sink);
+            }
+        };
+    }
+
     private void writePayload(HttpUrl url, String payload) {
-        Request request = authorize(new Request.Builder().url(url).post(RequestBody.create(payload, LINE_PROTOCOL))).build();
-        try (Response response = client.newCall(request).execute()) {
+        Request request = authorize(new Request.Builder().url(url).post(singleAttemptWriteBody(payload))).build();
+        try (Response response = writeClient.newCall(request).execute()) {
             if (!response.isSuccessful()) throw new InfluxWriteHttpException(response.code(), readBody(response));
         } catch (IOException e) {
             throw new UncheckedIOException("InfluxDB1 write I/O failed; commit status is unknown", e);
@@ -767,6 +799,7 @@ public class InfluxDB1Adapter implements TSDBAdapter {
     /**
      * Validates and encodes all records before sending millisecond-precision line protocol writes.
      * Splits requests at 5,000 lines or 1 MiB; multiple requests are not atomic.
+     * Adapter writes never replay automatically; callers decide whether to retry using an idempotency strategy.
      *
      * @param database target database; null or blank selects the configured default
      * @param records input records; null or empty returns an empty success after checking adapter state

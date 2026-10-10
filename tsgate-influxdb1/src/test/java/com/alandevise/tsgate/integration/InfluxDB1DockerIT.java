@@ -18,7 +18,16 @@ import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class InfluxDB1DockerIT {
+class InfluxDB1DockerIT implements com.alandevise.tsgate.contract.BackendSemanticsContract {
+    @Override public com.alandevise.tsgate.adapter.TSDBAdapter semanticsAdapter() { return adapter; }
+    @Override public com.alandevise.tsgate.core.TGQueryBuilder<?> semanticsQuery() { return template.query(Point.class); }
+    @Override public String semanticsMeasurement() { return "points"; }
+    @Override public long semanticsTime() { return base; }
+    @Override public void awaitSemanticsVisibility(List<TSDBRecord> expected) {
+        // This HTTP fixture tests acknowledged writes against the configured InfluxDB 1.x version.
+    }
+    @Override public void configureSemanticsRowLimit(int rows) { initialize(rows, 16L * 1024 * 1024); }
+
     static final String URL = System.getProperty("tsdb.it.influxdb1.url", "http://127.0.0.1:18086");
     InfluxDB1Adapter adapter;
     TGTemplate template;

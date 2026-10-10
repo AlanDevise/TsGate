@@ -104,7 +104,9 @@ public class InfluxDBProperties {
          */
         private long callTimeoutMs = 0L;
         /**
-         * Whether the HTTP client automatically retries connection failures.
+         * Enables OkHttp connection recovery for adapter SQL reads; defaults to true.
+         * Unified adapter writes never replay automatically, regardless of this setting.
+         * The borrowed native client retains its SDK retry policy.
          */
         private boolean retryOnConnectionFailure = true;
     }

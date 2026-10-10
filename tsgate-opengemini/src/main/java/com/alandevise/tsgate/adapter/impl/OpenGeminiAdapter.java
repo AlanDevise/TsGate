@@ -53,8 +53,8 @@ public class OpenGeminiAdapter implements TSDBAdapter {
 
     /**
      * Copies and validates settings without contacting the server; call {@link #init()} before use.
-     * Later property changes do not reconfigure this instance. HTTP connection recovery is disabled
-     * by default so failed writes are not automatically replayed by the compatibility client.
+     * Later property changes do not reconfigure this instance. Connection recovery for reads and
+     * compatible native operations is disabled by default. Unified adapter writes never replay automatically.
      *
      * @param config connection settings and operation limits
      * @param httpConfig HTTP pool and timeout settings

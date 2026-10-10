@@ -28,7 +28,14 @@ import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class OpenGeminiDockerIT {
+class OpenGeminiDockerIT implements com.alandevise.tsgate.contract.BackendSemanticsContract {
+    @Override public com.alandevise.tsgate.adapter.TSDBAdapter semanticsAdapter() { return adapter; }
+    @Override public com.alandevise.tsgate.core.TGQueryBuilder<?> semanticsQuery() { return template.query(Point.class); }
+    @Override public String semanticsMeasurement() { return "points"; }
+    @Override public long semanticsTime() { return base; }
+    @Override public void awaitSemanticsVisibility(List<TSDBRecord> expected) { awaitVisible(expected); }
+    @Override public void configureSemanticsRowLimit(int rows) { initialize(rows, 16L * 1024 * 1024); }
+
     static final String URL = System.getProperty("tsdb.it.opengemini.url", "http://127.0.0.1:28086");
     static final String VERSION = System.getProperty("tsdb.it.opengemini.version", "1.5.2");
     static final int REPLICAS = Integer.getInteger("tsdb.it.opengemini.replicas", 1);

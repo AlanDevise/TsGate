@@ -145,6 +145,37 @@ class TSDBQueryValidatorTest {
                 Stream.of(Arguments.of(new QueryFilter("value", OperatorEnum.IN, List.of(1, 2, 3))))));
     }
 
+    @ParameterizedTest @MethodSource("malformedAggregations")
+    void rejectsMalformedAggregationsWithoutChangingCallerState(AggregationSpec aggregation) {
+        TSDBQuery query = new TSDBQuery();
+        query.setAggregations(Arrays.asList(aggregation));
+        TSDBQuery snapshot = query.copy();
+        TSDBException failure = assertThrows(TSDBException.class, () -> TSDBQueryValidator.validate(query));
+        assertThat(failure.getErrorCode()).isEqualTo(TSDBErrorCodeEnum.ARGUMENT_ERROR);
+        assertThat(failure.getMessage()).contains("aggregation");
+        assertThat(query).usingRecursiveComparison().isEqualTo(snapshot);
+    }
+
+    static Stream<Arguments> malformedAggregations() {
+        return Stream.of(
+                Arguments.of((Object) null),
+                Arguments.of(new AggregationSpec("value", null, "total")),
+                Arguments.of(new AggregationSpec(null, AggregationFunctionEnum.SUM, "total")),
+                Arguments.of(new AggregationSpec(" ", AggregationFunctionEnum.SUM, "total")),
+                Arguments.of(new AggregationSpec("value", AggregationFunctionEnum.SUM, null)),
+                Arguments.of(new AggregationSpec("value", AggregationFunctionEnum.SUM, " ")));
+    }
+
+    @Test void preservesValidAggregationIntentAndCountWildcard() {
+        TSDBQuery query = new TSDBQuery();
+        query.setAggregations(List.of(
+                new AggregationSpec("*", AggregationFunctionEnum.COUNT, "row_count"),
+                new AggregationSpec(" value ", AggregationFunctionEnum.SUM, " TOTAL ")));
+        TSDBQuery snapshot = query.copy();
+        TSDBQueryValidator.validate(query);
+        assertThat(query).usingRecursiveComparison().isEqualTo(snapshot);
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"aliases", "tag-alias", "tags", "window-tag", "window-alias"})
     void rejectsCollidingAggregateOutputNames(String scenario) {

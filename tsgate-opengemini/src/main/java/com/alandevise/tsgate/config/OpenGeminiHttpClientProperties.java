@@ -35,8 +35,8 @@ public class OpenGeminiHttpClientProperties {
      */
     private long callTimeoutMs = 0L;
     /**
-     * Enables OkHttp recovery from eligible connection failures; defaults to false.
-     * Recovery can replay eligible requests and does not establish write idempotency or a known commit boundary.
+     * Enables OkHttp connection recovery for adapter reads and compatible native operations; defaults to false.
+     * Unified adapter writes never replay automatically, regardless of this setting.
      */
     private boolean retryOnConnectionFailure = false;
 }

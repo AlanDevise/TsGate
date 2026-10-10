@@ -14,7 +14,28 @@ import java.net.http.*;
 import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-class InfluxDBDockerIT extends DatabaseContractIT {
+class InfluxDBDockerIT extends DatabaseContractIT implements com.alandevise.tsgate.contract.BackendSemanticsContract {
+    @Override public com.alandevise.tsgate.adapter.TSDBAdapter semanticsAdapter() { return adapter; }
+    @Override public com.alandevise.tsgate.core.TGQueryBuilder<?> semanticsQuery() { return template.query(Telemetry.class); }
+    @Override public String semanticsMeasurement() { return "telemetry"; }
+    @Override public long semanticsTime() { return BASE; }
+    @Override public void awaitSemanticsVisibility(List<TSDBRecord> expected) {
+        // This HTTP fixture tests acknowledged writes against the configured InfluxDB Core version.
+    }
+    @Override public void configureSemanticsRowLimit(int rows) {
+        adapter.close();
+        InfluxDBProperties properties = new InfluxDBProperties();
+        properties.setUrl(URL);
+        properties.setDatabase(db);
+        properties.setMaxBatchRecords(100);
+        properties.setMaxQueryRows(rows);
+        properties.setStrictCursorSql(StrictCursorSqlStrategyEnum.valueOf(System.getProperty(
+                "tsdb.it.influxdb.strict-cursor-sql", "OR").replace('-', '_').toUpperCase(Locale.ROOT)));
+        adapter = new InfluxDBAdapter(properties, false);
+        adapter.init();
+        template = new TGTemplate(adapter);
+    }
+
     static final String URL=System.getProperty("tsdb.it.influxdb.url","http://127.0.0.1:18181");
     HttpClient admin;
     @BeforeEach void setup() throws Exception {

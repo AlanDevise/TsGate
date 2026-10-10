@@ -24,12 +24,13 @@ public final class TSDBQueryValidator {
     }
 
     /**
-     * Rejects absent queries, invalid pagination or time bounds, and malformed filter operands.
+     * Rejects absent queries, invalid pagination or time bounds, malformed filters, and malformed aggregations.
      * <p>Null limits and offsets, zero offsets, equal or one-sided time bounds, and positive pagination-probe
      * limits remain valid. Comparisons require one operand, BETWEEN requires exactly two, and IN requires at least one.
      * Filter operands must not contain null or non-finite Float/Double values. String literals, including the text
      * {@code "null"}, retain their literal meaning. Backend implementations retain responsibility for capability,
-     * numeric precision and size limits. Native SQL and the builder's optional-filter normalization are unchanged.</p>
+     * numeric precision and size limits. Aggregations require a non-null item and function, and nonblank field and alias.
+     * Native SQL and the builder's optional-filter and aggregation normalization are unchanged.</p>
      *
      * @param query common query model to validate; its state is not modified
      * @throws TSDBException with {@code ARGUMENT_ERROR} when a shared argument is invalid
@@ -50,6 +51,25 @@ public final class TSDBQueryValidator {
         }
         for (QueryFilter filter : query.getFilters()) {
             validateFilter(filter);
+        }
+        for (AggregationSpec aggregation : query.getAggregations()) {
+            validateAggregation(aggregation);
+        }
+    }
+
+    /** Rejects malformed aggregation specifications before any SQL translator can dereference them. */
+    private static void validateAggregation(AggregationSpec aggregation) {
+        if (aggregation == null) {
+            throw argument("aggregation must not be null");
+        }
+        if (aggregation.function() == null) {
+            throw argument("aggregation function must not be null");
+        }
+        if (aggregation.field() == null || aggregation.field().isBlank()) {
+            throw argument("aggregation field must not be empty");
+        }
+        if (aggregation.alias() == null || aggregation.alias().isBlank()) {
+            throw argument("aggregation alias must not be empty");
         }
     }
 
