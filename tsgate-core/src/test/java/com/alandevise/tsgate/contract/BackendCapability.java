@@ -2,6 +2,8 @@ package com.alandevise.tsgate.contract;
 
 import com.alandevise.tsgate.model.AggregationFunctionEnum;
 import com.alandevise.tsgate.model.AggregationSpec;
+import com.alandevise.tsgate.model.OperatorEnum;
+import com.alandevise.tsgate.model.QueryFilter;
 import com.alandevise.tsgate.model.SortOrderEnum;
 import com.alandevise.tsgate.model.SortSpec;
 import com.alandevise.tsgate.model.TSDBQuery;
@@ -15,7 +17,9 @@ public enum BackendCapability {
     BATCH_WRITE,
     FIELD_SORT,
     STRICT_COMPOSITE_CURSOR,
-    REGIONAL_CALENDAR_DAY;
+    REGIONAL_CALENDAR_DAY,
+    TIME_FILTER_NE,
+    TIME_FILTER_IN;
 
     /** Builds an actual operation; an unsupported capability must reject it before I/O. */
     public TSDBQuery query() {
@@ -30,6 +34,8 @@ public enum BackendCapability {
                 query.setSortSpecs(List.of(new SortSpec("time", SortOrderEnum.ASC),
                         new SortSpec("device", SortOrderEnum.DESC)));
             }
+            case TIME_FILTER_NE -> query.setFilters(List.of(new QueryFilter("time", OperatorEnum.NE, List.of(1L))));
+            case TIME_FILTER_IN -> query.setFilters(List.of(new QueryFilter("time", OperatorEnum.IN, List.of(1L, 2L))));
             case REGIONAL_CALENDAR_DAY -> {
                 query.setGroupByTime("1d");
                 query.setTimeZone("America/New_York");

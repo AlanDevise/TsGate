@@ -19,6 +19,9 @@ import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 class InfluxDB1DockerIT implements com.alandevise.tsgate.contract.BackendSemanticsContract {
+    @Override public String semanticsBackendId() { return "influxdb1"; }
+    @Override public String semanticsServerVersion() { return System.getProperty("tsdb.it.influxdb1.version", "1.13.1"); }
+    @Override public String semanticsProtocol() { return "influxql-http"; }
     @Override public com.alandevise.tsgate.adapter.TSDBAdapter semanticsAdapter() { return adapter; }
     @Override public com.alandevise.tsgate.core.TGQueryBuilder<?> semanticsQuery() { return template.query(Point.class); }
     @Override public String semanticsMeasurement() { return "points"; }

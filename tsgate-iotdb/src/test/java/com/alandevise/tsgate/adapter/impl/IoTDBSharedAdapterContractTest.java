@@ -4,6 +4,13 @@ import com.alandevise.tsgate.adapter.TSDBAdapter;
 import com.alandevise.tsgate.config.IoTDBProperties;
 import com.alandevise.tsgate.contract.SharedAdapterContract;
 import com.alandevise.tsgate.contract.SharedAdapterFixture;
+import com.alandevise.tsgate.exception.TSDBErrorCodeEnum;
+import com.alandevise.tsgate.exception.TSDBException;
+import com.alandevise.tsgate.model.OperatorEnum;
+import com.alandevise.tsgate.model.QueryFilter;
+import com.alandevise.tsgate.model.TSDBQuery;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.apache.iotdb.isession.ITableSession;
 import org.apache.iotdb.isession.SessionDataSet;
 import org.apache.iotdb.isession.pool.ITableSessionPool;
@@ -19,6 +26,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.math.BigDecimal;
+import java.time.Instant;
+
+import static org.junit.jupiter.api.Assertions.*;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -26,6 +37,32 @@ import static org.mockito.Mockito.*;
 
 /** Uses controlled SDK sessions while exercising the real IoTDB translation, validation and commit handling. */
 class IoTDBSharedAdapterContractTest implements SharedAdapterContract {
+    @ParameterizedTest
+    @ValueSource(strings = {"TIME", "Time", "time"})
+    void unquotedTimeColumnIdentityUsesExactMillisecondsForQueryAndCount(String column) throws Exception {
+        try (SharedAdapterFixture fixture = createFixture()) {
+            fixture.initialize();
+            TSDBQuery query = SharedAdapterContract.detail();
+            query.setTimeColumn("TiMe");
+            query.setFilters(List.of(new QueryFilter(column, OperatorEnum.GT,
+                    List.of(Instant.ofEpochMilli(1_783_000_000_001L)))));
+            fixture.enqueueRows();
+            assertTrue(fixture.adapter().query(null, query).isSuccess());
+            assertTrue(fixture.lastQuerySql().contains(column + " > 1783000000001"), fixture.lastQuerySql());
+            fixture.enqueueCount(0);
+            assertEquals(0L, fixture.adapter().count(null, query));
+            assertTrue(fixture.lastQuerySql().contains(column + " > 1783000000001"), fixture.lastQuerySql());
+            for (Object invalid : List.of("1783000000001", true, new BigDecimal("1.1"))) {
+                query.setFilters(List.of(new QueryFilter(column, OperatorEnum.EQ, List.of(invalid))));
+                assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                        assertThrows(TSDBException.class, () -> fixture.adapter().query(null, query)).getErrorCode());
+                assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR,
+                        assertThrows(TSDBException.class, () -> fixture.adapter().count(null, query)).getErrorCode());
+            }
+            assertEquals(2, fixture.ioCount());
+        }
+    }
+
     @Override
     public String backendId() { return "iotdb"; }
 

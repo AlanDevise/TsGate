@@ -101,6 +101,8 @@ public class TGQueryBuilder<T> {
 
     /**
      * Adds an equality filter for a tag.
+     * <p>Non-null values use {@link String#valueOf(Object)}, matching tag write conversion.
+     * Null values are ignored; string values retain their whitespace.</p>
      *
      * @param tagName tag column name, for example {@code "device_code"}
      * @param value   tag filter value, for example {@code "device001"}
@@ -110,11 +112,16 @@ public class TGQueryBuilder<T> {
      */
     public TGQueryBuilder<T> whereTag(String tagName,
                                         Object value) {
-        return where(tagName, OperatorEnum.EQ, value);
+        if (isBlank(tagName) || value == null) {
+            return this;
+        }
+        return where(tagName, OperatorEnum.EQ, String.valueOf(value));
     }
 
     /**
      * Adds an IN filter for a tag.
+     * <p>Non-null values use {@link String#valueOf(Object)}, matching tag write conversion.
+     * Null elements are ignored; string values, input order, and duplicate values are preserved.</p>
      *
      * @param tagName tag column name, for example {@code "region"}
      * @param values  tag filter values, for example {@code List.of("beijing", "shanghai")}
@@ -124,11 +131,25 @@ public class TGQueryBuilder<T> {
      */
     public TGQueryBuilder<T> whereTagIn(String tagName,
                                           Collection<?> values) {
-        return where(tagName, OperatorEnum.IN, values);
+        if (isBlank(tagName) || values == null || values.isEmpty()) {
+            return this;
+        }
+        List<String> tagValues = new ArrayList<>();
+        for (Object value : values) {
+            if (value != null) {
+                tagValues.add(String.valueOf(value));
+            }
+        }
+        return where(tagName, OperatorEnum.IN, tagValues);
     }
 
     /**
-     * Adds a single-value filter for a tag or field.
+     * Adds a single-value filter for a tag, field, or physical time column.
+     * <p>Operators on the model's actual physical time column depend on backend capabilities; unsupported
+     * combinations fail before database I/O. Use the collection overload for multiple operands such as
+     * BETWEEN. Numeric time operands must convert exactly to
+     * signed 64-bit whole epoch milliseconds; {@link Instant} operands use {@link Instant#toEpochMilli()}.
+     * Other primary-time operand types, including strings, are rejected rather than inferred.</p>
      *
      * @param column   filter column name, for example {@code "value"}
      * @param operator operator, for example {@code OperatorEnum.GE}
@@ -148,6 +169,10 @@ public class TGQueryBuilder<T> {
 
     /**
      * Adds a multiple-value filter, typically IN or BETWEEN.
+     * <p>Operators on the model's actual physical time column depend on backend capabilities; unsupported
+     * combinations fail before database I/O. Each numeric time operand must convert exactly to signed 64-bit whole epoch milliseconds;
+     * {@link Instant} operands use {@link Instant#toEpochMilli()}. Other primary-time operand types,
+     * including strings, are rejected rather than inferred.</p>
      *
      * @param column   filter column name, for example {@code "value"}
      * @param operator operator, for example {@code OperatorEnum.BETWEEN}

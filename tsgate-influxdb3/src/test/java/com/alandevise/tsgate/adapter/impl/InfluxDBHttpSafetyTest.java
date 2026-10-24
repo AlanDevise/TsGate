@@ -7,8 +7,11 @@ import com.alandevise.tsgate.exception.TSDBException;
 import com.alandevise.tsgate.model.BatchCommitStateEnum;
 import com.alandevise.tsgate.model.BatchWriteResult;
 import com.alandevise.tsgate.model.TSDBQuery;
+import com.alandevise.tsgate.model.OperatorEnum;
+import com.alandevise.tsgate.model.QueryFilter;
 import com.alandevise.tsgate.model.TSDBRecord;
 import com.sun.net.httpserver.HttpServer;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,7 +35,7 @@ import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Exercises redirects, write replay prevention, and complete-batch byte budgets through a local HTTP peer. */
+/** Exercises transport, strict response parsing, and literal encoding through a local HTTP peer. */
 class InfluxDBHttpSafetyTest {
     private HttpServer server;
     private InfluxDBAdapter adapter;
@@ -409,5 +412,46 @@ class InfluxDBHttpSafetyTest {
         assertTrue(result.isSuccess());
         assertEquals(0, result.getRowCount());
         assertEquals(0L, adapter.count(null, query));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void timeFiltersUseMillisecondsAndPreserveCaseDistinctFields(boolean countOnly) throws Exception {
+        TSDBQuery query = filteredQuery("time", 1783000000000L);
+        query.getFilters().add(new QueryFilter("TIME", OperatorEnum.EQ, List.of(7)));
+        completeEmptyRead(query, countOnly);
+        String sql = lastQuery();
+        assertTrue(sql.contains("\"time\" = timestamp '2026-07-02T13:46:40Z'"), sql);
+        assertTrue(sql.contains("\"TIME\" = 7"), sql);
+
+        int beforeInvalidTime = requests.size();
+        TSDBQuery textTimeQuery = filteredQuery("time", "1783000000000");
+        TSDBException error = assertThrows(TSDBException.class, () -> {
+            if (countOnly) adapter.count(null, textTimeQuery);
+            else adapter.query(null, textTimeQuery);
+        });
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR, error.getErrorCode());
+        assertEquals(beforeInvalidTime, requests.size());
+
+        TSDBQuery textFieldQuery = filteredQuery("v", "1783000000000");
+        completeEmptyRead(textFieldQuery, countOnly);
+        assertTrue(lastQuery().contains("\"v\" = '1783000000000'"), lastQuery());
+    }
+
+    private static TSDBQuery filteredQuery(String column, Object value) {
+        TSDBQuery query = new TSDBQuery();
+        query.setMeasurement("points");
+        query.setFilters(List.of(new QueryFilter(column, OperatorEnum.EQ, List.of(value))));
+        return query;
+    }
+
+    private void completeEmptyRead(TSDBQuery query, boolean countOnly) {
+        replies.add(new Reply(200, countOnly ? "[{\"total\":0}]" : "[]", null));
+        if (countOnly) assertEquals(0L, adapter.count(null, query));
+        else assertTrue(adapter.query(null, query).isSuccess());
+    }
+
+    private String lastQuery() throws Exception {
+        return new ObjectMapper().readTree(requests.get(requests.size() - 1).body()).get("q").asText();
     }
 }

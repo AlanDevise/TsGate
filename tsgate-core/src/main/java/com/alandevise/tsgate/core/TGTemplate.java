@@ -827,8 +827,8 @@ public class TGTemplate {
         return mappedRows;
     }
 
-    /** Validates map result types before any query or count request, including empty-result queries. */
-    private static void validateResultType(Class<?> resultType) {
+    /** Validates result types before any query or count request, including empty-result queries. */
+    private void validateResultType(Class<?> resultType) {
         if (resultType == null) {
             throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "resultType must not be null");
         }
@@ -836,6 +836,9 @@ public class TGTemplate {
                 && resultType != LinkedHashMap.class && resultType != HashMap.class && resultType != TreeMap.class) {
             throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR,
                     "Supported Map result types are Map, LinkedHashMap, HashMap, and TreeMap: " + resultType.getName());
+        }
+        if (!Map.class.isAssignableFrom(resultType)) {
+            metadataResolver.validateResultType(resultType);
         }
     }
 

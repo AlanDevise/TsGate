@@ -3,6 +3,7 @@ package com.alandevise.tsgate.adapter.impl;
 import com.alandevise.tsgate.util.TimeWindowDuration;
 import com.alandevise.tsgate.util.TimeWindowPlan;
 import com.alandevise.tsgate.util.TSDBQueryValidator;
+import com.alandevise.tsgate.util.QueryLiteralSupport;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.JsonParser;
@@ -548,6 +549,9 @@ public class InfluxDBAdapter implements TSDBAdapter {
 
     /**
      * Translates and executes the unified query model as InfluxDB SQL.
+     * Primary-time Number filters use exact whole epoch milliseconds; Instant filters use millisecond precision.
+     * Primary-time operands must be Number or Instant; text is not inferred as a timestamp.
+     * Non-time text operands retain their existing literal meaning.
      *
      * @param database target database, for example {@code "tsdb"}; blank uses the configured default
      * @param query    unified query model, for example {@code measurement=ACCRUE, limit=100}
@@ -1061,7 +1065,7 @@ public class InfluxDBAdapter implements TSDBAdapter {
                     + sqlString(Instant.ofEpochMilli(query.getCursorTime()).toString()));
         }
         for (QueryFilter filter : query.getFilters()) {
-            clauses.add(buildFilterSql(filter));
+            clauses.add(buildFilterSql(filter, query.getTimeColumn()));
         }
         return clauses;
     }
@@ -1434,11 +1438,12 @@ public class InfluxDBAdapter implements TSDBAdapter {
      * Translates a unified filter to an InfluxDB WHERE fragment.
      *
      * @param filter unified filter, for example {@code new QueryFilter("device_code", OperatorEnum.EQ, List.of("D001"))}
+     * @param timeColumnName primary time column, for example {@code "time"}
      * @return InfluxDB WHERE fragment, for example {@code "\"device_code\" = 'D001'"}
      * @author Alan Zhang [initiator@alandevise.com]
      * @since 2026-07-02
      */
-    private static String buildFilterSql(QueryFilter filter) {
+    private static String buildFilterSql(QueryFilter filter, String timeColumnName) {
         if (filter == null || isBlank(filter.column()) || filter.operator() == null) {
             throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "Invalid query filter");
         }
@@ -1448,21 +1453,22 @@ public class InfluxDBAdapter implements TSDBAdapter {
                     "Filter values must not be empty: " + filter.column());
         }
         String column = quoteIdentifier(filter.column());
+        boolean timeColumn = column.equals(quoteIdentifier(timeColumnName));
         OperatorEnum operator = filter.operator();
         return switch (operator) {
-            case EQ -> column + " = " + formatSqlValue(values.get(0));
-            case NE -> column + " <> " + formatSqlValue(values.get(0));
-            case GT -> column + " > " + formatSqlValue(values.get(0));
-            case GE -> column + " >= " + formatSqlValue(values.get(0));
-            case LT -> column + " < " + formatSqlValue(values.get(0));
-            case LE -> column + " <= " + formatSqlValue(values.get(0));
-            case IN -> column + " IN (" + joinSqlValues(values) + ")";
+            case EQ -> column + " = " + formatFilterValue(values.get(0), timeColumn);
+            case NE -> column + " <> " + formatFilterValue(values.get(0), timeColumn);
+            case GT -> column + " > " + formatFilterValue(values.get(0), timeColumn);
+            case GE -> column + " >= " + formatFilterValue(values.get(0), timeColumn);
+            case LT -> column + " < " + formatFilterValue(values.get(0), timeColumn);
+            case LE -> column + " <= " + formatFilterValue(values.get(0), timeColumn);
+            case IN -> column + " IN (" + joinSqlValues(values, timeColumn) + ")";
             case BETWEEN -> {
                 if (values.size() < 2) {
                     throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR,
                             "BETWEEN filter requires two values: " + filter.column());
                 }
-                yield column + " BETWEEN " + formatSqlValue(values.get(0)) + " AND " + formatSqlValue(values.get(1));
+                yield column + " BETWEEN " + formatFilterValue(values.get(0), timeColumn) + " AND " + formatFilterValue(values.get(1), timeColumn);
             }
         };
     }
@@ -1721,21 +1727,31 @@ public class InfluxDBAdapter implements TSDBAdapter {
      * Joins SQL literals for an IN condition.
      *
      * @param values IN values, for example {@code List.of("beijing", "shanghai")}
+     * @param timeColumn whether operands belong to the primary time column
      * @return SQL literal list, for example {@code "'beijing', 'shanghai'"}
      * @author Alan Zhang [initiator@alandevise.com]
      * @since 2026-07-02
      */
-    private static String joinSqlValues(List<Object> values) {
+    private static String joinSqlValues(List<Object> values, boolean timeColumn) {
         List<String> sqlValues = new ArrayList<>();
         for (Object value : values) {
             if (value != null) {
-                sqlValues.add(formatSqlValue(value));
+                sqlValues.add(formatFilterValue(value, timeColumn));
             }
         }
         if (sqlValues.isEmpty()) {
             throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "IN filter values must not be empty");
         }
         return String.join(", ", sqlValues);
+    }
+
+    /** Formats primary-time numeric and Instant operands with the common epoch-millisecond contract. */
+    private static String formatFilterValue(Object value, boolean timeColumn) {
+        if (timeColumn) {
+            long millis = QueryLiteralSupport.exactEpochMillis(value);
+            return "timestamp " + sqlString(Instant.ofEpochMilli(millis).toString());
+        }
+        return formatSqlValue(value);
     }
 
     /**
@@ -1747,7 +1763,10 @@ public class InfluxDBAdapter implements TSDBAdapter {
      * @since 2026-07-02
      */
     private static String formatSqlValue(Object value) {
-        if (value instanceof Number || value instanceof Boolean) {
+        if (value instanceof Number number) {
+            return QueryLiteralSupport.numericLiteral(number);
+        }
+        if (value instanceof Boolean) {
             return value.toString();
         }
         if (value instanceof Instant) {

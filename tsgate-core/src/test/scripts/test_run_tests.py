@@ -135,8 +135,15 @@ class BackendSelectionTest(unittest.TestCase):
             return "test tool version"
 
         arguments = ["docker", "--output", str(output)] + (["--backend", backend] if backend else [])
-        result = dict(totals=dict(tests=1, failures=0, errors=0, skipped=0), suites=[])
-        with patch.object(RUNNER, "capture", side_effect=capture),                 patch.object(RUNNER, "git_commit", return_value="a" * 40),                 patch.object(RUNNER, "source_manifest", side_effect=manifests or [{}, {}, {}]),                 patch.object(RUNNER, "start_server", side_effect=start), patch.object(RUNNER, "wait_ready"),                 patch.object(RUNNER, "logged", return_value=0), patch.object(RUNNER, "reports", return_value=result):
+        registration = RUNNER.runpy.run_path(str(Path(__file__).with_name("verify-backend-registration.py")))["verify"](RUNNER.ROOT)
+        plan = RUNNER.docker_report_plan(registration, backend)
+        suites = [dict(module=entry["module"], name=entry["name"], cases=entry["requiredCases"] or ["roundTrip"],
+                       tests=max(1, len(entry["requiredCases"])), failures=0, errors=0, skipped=0)
+                  for entry in plan["requiredSuites"]]
+        result = dict(totals={key: sum(suite[key] for suite in suites)
+                              for key in ("tests", "failures", "errors", "skipped")},
+                      suites=suites, staleReports=[], unexpectedReports=[], ignoredReports=[])
+        with patch.object(RUNNER, "capture", side_effect=capture),                 patch.object(RUNNER, "git_commit", return_value="a" * 40),                 patch.object(RUNNER, "source_manifest", side_effect=manifests or [{}, {}, {}]),                 patch.object(RUNNER, "start_server", side_effect=start), patch.object(RUNNER, "wait_ready"),                 patch.object(RUNNER, "logged", return_value=0), patch.object(RUNNER, "reports", return_value=result), patch.dict(RUNNER.DOCKER_REPORTS, {"collect_reports": Mock(return_value=result)}):
             code = RUNNER.main(arguments)
         return code, json.loads((output / "summary.json").read_text()), created
 

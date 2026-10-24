@@ -59,7 +59,7 @@ class RegistrationTest(unittest.TestCase):
           }''')
         self.write(root, starter + "/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports", "example.FutureAutoConfiguration\n")
         self.write(root, "tsgate-core/src/test/java/com/alandevise/tsgate/contract/SharedAdapterContract.java", 'package com.alandevise.tsgate.contract; public interface SharedAdapterContract { @Test default void shared() {} }')
-        self.write(root, "tsgate-core/src/test/java/com/alandevise/tsgate/contract/BackendSemanticsContract.java", 'package com.alandevise.tsgate.contract; public interface BackendSemanticsContract { @Test default void semantics() {} }')
+        self.write(root, "tsgate-core/src/test/java/com/alandevise/tsgate/contract/BackendSemanticsContract.java", 'package com.alandevise.tsgate.contract; public interface BackendSemanticsContract { @Test default void semantics() {} @Test default void capabilityBatchWriteRoundTripsRows() {} }')
         self.write(root, adapter_module + "/src/test/java/example/FutureSharedTest.java", 'package example; import com.alandevise.tsgate.contract.SharedAdapterContract; class FutureSharedTest implements SharedAdapterContract {}')
         self.write(root, adapter_module + "/src/test/java/example/FutureDockerIT.java", 'package example; import com.alandevise.tsgate.contract.BackendSemanticsContract; class FutureDockerIT implements BackendSemanticsContract { @Test void roundTrip() {} }')
         self.write(root, starter + "/src/test/java/example/FutureStarterDockerIT.java", 'package example; class FutureStarterDockerIT { @Test void startup() {} }')
@@ -130,6 +130,50 @@ jobs:
             result = CHECK.verify(root)
             self.assertEqual(["futuredb"], result["backends"])
             self.assertEqual(["docker"], result["deploymentJobs"])
+
+    def test_report_plan_uses_selected_module_class_and_capability_case_identities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            plan = CHECK.verify(root)["dockerReports"]["futuredb"]
+            self.assertEqual("future", plan["selector"])
+            self.assertEqual({("tsgate-futuredb", "example.FutureDockerIT"),
+                              ("tsgate-futuredb-spring-boot-starter", "example.FutureStarterDockerIT")},
+                             {(entry["module"], entry["name"]) for entry in plan["requiredSuites"]})
+            adapter = next(entry for entry in plan["requiredSuites"] if entry["module"] == "tsgate-futuredb")
+            self.assertEqual(["capabilityBatchWriteRoundTripsRows"], adapter["requiredCases"])
+            self.assertEqual(2, len(plan["allowedSuites"]))
+
+    def test_semantic_capability_case_cannot_be_hidden_by_an_untested_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            self.mutate(root, "tsgate-futuredb/src/test/java/example/FutureDockerIT.java",
+                        '@Test void roundTrip() {}',
+                        '@Test void roundTrip() {} public void capabilityBatchWriteRoundTripsRows() {}')
+            with self.assertRaisesRegex(ValueError, "real capability test missing or hidden"):
+                CHECK.verify(root)
+
+    def test_time_filter_capability_cases_are_required_for_support_and_rejection_profiles(self):
+        for capability in ("TIME_FILTER_NE", "TIME_FILTER_IN"):
+            test = CHECK.CAPABILITY_TESTS[capability]
+            for status in ("SUPPORTED", "UNSUPPORTED"):
+                with self.subTest(capability=capability, status=status), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    self.fixture(root)
+                    self.write(root, CHECK.CAPABILITIES,
+                               'backend,module,contractTest,BATCH_WRITE,' + capability + '\n'
+                               + 'futuredb,tsgate-futuredb,example.FutureSharedTest,SUPPORTED,' + status + '\n')
+                    contract = "tsgate-core/src/test/java/com/alandevise/tsgate/contract/BackendSemanticsContract.java"
+                    self.mutate(root, contract, '@Test default void semantics() {}',
+                                '@Test default void semantics() {} @Test default void ' + test + '() {}')
+                    plan = CHECK.verify(root)["dockerReports"]["futuredb"]
+                    adapter = next(entry for entry in plan["requiredSuites"] if entry["module"] == "tsgate-futuredb")
+                    self.assertIn(test, adapter["requiredCases"])
+                    self.mutate(root, "tsgate-futuredb/src/test/java/example/FutureDockerIT.java",
+                                '@Test void roundTrip() {}', '@Test void roundTrip() {} public void ' + test + '() {}')
+                    with self.assertRaisesRegex(ValueError, "real capability test missing or hidden: " + capability):
+                        CHECK.verify(root)
 
     def test_every_required_registration_is_checked(self):
         cases = [

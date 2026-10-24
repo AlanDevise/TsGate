@@ -25,6 +25,14 @@ ROOT = Path(__file__).resolve().parents[4]
 MANIFEST = "tsgate-core/src/test/resources/ci/backend-registration.json"
 CAPABILITIES = "tsgate-core/src/test/resources/contracts/adapter-capabilities.csv"
 CONDITION = "tsgate-core/src/main/java/com/alandevise/tsgate/config/TSDBAdapterEnabledCondition.java"
+CAPABILITY_TESTS = {
+    "BATCH_WRITE": "capabilityBatchWriteRoundTripsRows",
+    "FIELD_SORT": "capabilityFieldSortReturnsExpectedRows",
+    "STRICT_COMPOSITE_CURSOR": "capabilityStrictCompositeCursorReturnsEveryPoint",
+    "REGIONAL_CALENDAR_DAY": "capabilityRegionalCalendarDayReturnsExpectedWindows",
+    "TIME_FILTER_NE": "capabilityTimeNotEqualReturnsExpectedRows",
+    "TIME_FILTER_IN": "capabilityTimeInReturnsExpectedRows",
+}
 NS = {"m": "http://maven.apache.org/POM/4.0.0"}
 TOKEN = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|"""[\s\S]*?"""|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[A-Za-z_$][\w$]*|\S')
 
@@ -175,6 +183,45 @@ def methods(declaration):
         else:
             index += 1
     return result
+
+
+def effective_methods(declaration, inventory, seen=None):
+    """Resolve overrides before deciding whether a named contract test is executable."""
+    seen = set() if seen is None else seen
+    identity = (declaration["module"], declaration["name"])
+    if identity in seen:
+        return {}
+    seen.add(identity)
+    found = {}
+    for name in parents(declaration):
+        parent = type_for(inventory, name, declaration["module"])
+        if parent is not None:
+            found.update(effective_methods(parent, inventory, seen))
+    found.update((method["name"], method) for method in methods(declaration))
+    return found
+
+
+def docker_report_plan(row, selected, inventory, profile):
+    """Derive report identities from the same source declarations used for registration checks."""
+    required, allowed = [], []
+    for declaration in sorted(selected, key=lambda item: (item["module"], item["name"])):
+        entry = dict(module=declaration["module"], name=declaration["name"])
+        allowed.append(entry.copy())
+        cases = []
+        if declaration["module"] == row["module"] and implements(
+                declaration["name"], "com.alandevise.tsgate.contract.BackendSemanticsContract",
+                inventory, declaration["module"]):
+            executed = effective_methods(declaration, inventory)
+            for capability, test in CAPABILITY_TESTS.items():
+                if capability not in profile:
+                    continue
+                require(test in executed and has_sequence(executed[test]["header"], ["@", "Test"]),
+                        row["id"] + ": real capability test missing or hidden: " + capability)
+                cases.append(test)
+        required.append(dict(**entry, requiredCases=cases))
+    return dict(kind=row["deployment"]["kind"],
+                selector=row["deployment"].get("backend", row["id"]),
+                requiredSuites=required, allowedSuites=allowed)
 
 
 def has_concrete_count(name, inventory, module=None, seen=None):
@@ -432,6 +479,7 @@ def verify(root=ROOT):
     require(len(gate_code) == 1, "Final CI gate must expose one executable Python check")
     full = scope.coverage([], full=True)
     selected_jobs, representative, matrix_selectors = set(), set(), set()
+    report_plans = {}
     for row in rows:
         identity = row["id"]
         require(has_concrete_count(row["adapter"], production, row["module"]),
@@ -493,6 +541,10 @@ def verify(root=ROOT):
             server = runner.backend_selection(servers, backend)
             require(len(server) == 1, identity + ": representative Docker server is missing")
             patterns = runner.BACKEND_TESTS[backend].split(",")
+            selected_tests = [declaration for declaration in tests.values()
+                              if declaration["kind"] == "class" and "abstract" not in declaration["signature"]
+                              and any(fnmatch.fnmatchcase(declaration["simple"], pattern) for pattern in patterns)
+                              and has_test(declaration, tests)]
             for module in (row["module"], row["starter"]):
                 candidates = [declaration for declaration in tests.values() if declaration["module"] == module
                               and declaration["kind"] == "class" and "abstract" not in declaration["signature"]
@@ -517,18 +569,21 @@ def verify(root=ROOT):
             require(entry in run_scripts(workflow[job]), identity + ": CI does not invoke the matrix runner")
             require(matrix.MATRIX and all(isinstance(item, tuple) and item for item in matrix.MATRIX),
                     identity + ": deployment matrix is empty")
+            selected_tests = []
             for module in (row["module"], row["starter"]):
                 test = matrix.MODULES.get(module)
                 test_type = type_for(tests, test, module)
                 require(test_type is not None and test_type["module"] == module
                         and "abstract" not in test_type["signature"] and has_test(test_type, tests),
                         identity + ": matrix Docker test missing for " + module)
+                selected_tests.append(test_type)
                 if module == row["module"]:
                     require(implements(test_type["name"],
                                        "com.alandevise.tsgate.contract.BackendSemanticsContract", tests, module),
                             identity + ": selected adapter Docker test must inherit BackendSemanticsContract")
             require(hasattr(matrix, "ENVIRONMENT") and Path(matrix.ENVIRONMENT).is_file(),
                     identity + ": deployment fixture is missing")
+        report_plans[identity] = docker_report_plan(row, selected_tests, tests, profile)
     require(representative == set(runner.BACKEND_TESTS) == set(scope.BACKENDS) == {server["kind"] for server in servers},
             "Representative Docker inventories differ from registered backends")
     require(set(full.get("docker", [])) == representative
@@ -546,7 +601,7 @@ def verify(root=ROOT):
         wrong_sha[job]["outputs"]["commit"] = "b" * 40
         require(not run_gate(gate_code[0], wrong_sha, commit), "Final CI gate ignores deployment source mismatch: " + job)
     return {"status": "passed", "backends": sorted(ids), "jarModules": sorted(jar_modules),
-            "deploymentJobs": sorted(selected_jobs)}
+            "deploymentJobs": sorted(selected_jobs), "dockerReports": report_plans}
 
 
 def main(argv=None):

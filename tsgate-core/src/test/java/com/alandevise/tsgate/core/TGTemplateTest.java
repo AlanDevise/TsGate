@@ -5,6 +5,7 @@ import com.alandevise.tsgate.annotation.*;
 import com.alandevise.tsgate.exception.*;
 import com.alandevise.tsgate.metadata.DefaultTSDBMetadataResolver;
 import com.alandevise.tsgate.metadata.TSDBMetadataResolver;
+import com.alandevise.tsgate.metadata.TSDBEntityMetadata;
 import com.alandevise.tsgate.model.*;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -18,6 +19,7 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.*;
@@ -746,6 +748,101 @@ class TGTemplateTest {
         verify(adapter, never()).executeQuery(any());
         verify(adapter, never()).query(any(), any());
         verify(adapter, never()).count(any(), any());
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"sql", "list", "cursor", "strict", "offset", "offsetWithoutCount"})
+    void invalidDtoTypesFailBeforeEveryTypedDatabaseEntryPoint(String terminal) {
+        AbstractResult.constructions.set(0);
+        for (Class<?> resultType : List.of(RecordResult.class, AbstractResult.class, InterfaceResult.class)) {
+            TSDBException failure = assertThrows(TSDBException.class,
+                    () -> requestTypedResult(template, terminal, resultType));
+            assertThat(failure.getErrorCode()).isEqualTo(TSDBErrorCodeEnum.METADATA_ERROR);
+            assertThat(failure).hasMessageContaining(resultType.getName());
+        }
+        assertThat(AbstractResult.constructions).hasValue(0);
+        verify(adapter, never()).executeQuery(any());
+        verify(adapter, never()).query(any(), any());
+        verify(adapter, never()).count(any(), any());
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"sql", "list", "cursor", "strict", "offset", "offsetWithoutCount"})
+    void existingCustomResolversRetainTheirOwnResultConstructionRules(String terminal) {
+        when(adapter.executeQuery("sql")).thenReturn(rows(row(1L, "a", 7.0)));
+        when(adapter.query(isNull(), any())).thenReturn(rows(row(1L, "a", 7.0)));
+        when(adapter.count(isNull(), any())).thenReturn(1L);
+        TGTemplate custom = new TGTemplate(adapter, new RecordAwareResolver());
+        Object result = requestTypedResult(custom, terminal, RecordResult.class);
+        List<?> actualRows = result instanceof PageResult<?> page ? page.getRows() : (List<?>) result;
+        assertThat(actualRows).singleElement().isEqualTo(new RecordResult(7));
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"sql", "list", "cursor", "strict", "offset", "offsetWithoutCount"})
+    void customResultValidationCanRejectTypesBeforeQueryOrCount(String terminal) {
+        TSDBMetadataResolver resolver = mock(TSDBMetadataResolver.class);
+        when(resolver.resolve(Point.class)).thenReturn(new DefaultTSDBMetadataResolver().resolve(Point.class));
+        doThrow(new TSDBException(TSDBErrorCodeEnum.METADATA_ERROR, "custom result restriction"))
+                .when(resolver).validateResultType(RecordResult.class);
+        TGTemplate custom = new TGTemplate(adapter, resolver);
+        assertThatThrownBy(() -> requestTypedResult(custom, terminal, RecordResult.class))
+                .isInstanceOf(TSDBException.class).hasMessage("custom result restriction");
+        verify(resolver).validateResultType(RecordResult.class);
+        verify(resolver, never()).toEntity(any(), any());
+        verify(adapter, never()).executeQuery(any());
+        verify(adapter, never()).query(any(), any());
+        verify(adapter, never()).count(any(), any());
+    }
+
+    @Test void mapResultTypesBypassCustomResolverPreflightAndMapping() {
+        TSDBMetadataResolver resolver = mock(TSDBMetadataResolver.class);
+        TGTemplate maps = new TGTemplate(adapter, resolver);
+        when(adapter.executeQuery("sql")).thenReturn(rows(Map.of("value", 7)));
+        for (Class<?> type : List.of(Map.class, LinkedHashMap.class, HashMap.class, TreeMap.class)) {
+            assertThat(maps.executeQuery("sql", type)).singleElement()
+                    .satisfies(row -> assertThat(((Map<?, ?>) row).get("value")).isEqualTo(7));
+        }
+        verifyNoInteractions(resolver);
+    }
+
+    @Test void defaultResolverSubclassesCanReplaceBothMappingAndPreflightRules() {
+        DefaultTSDBMetadataResolver resolver = new DefaultTSDBMetadataResolver() {
+            @Override public void validateResultType(Class<?> resultType) { }
+            @Override public <T> T toEntity(Class<T> entityType, Map<String, Object> row) {
+                return entityType.cast(new RecordResult(((Number) row.get("value")).intValue()));
+            }
+        };
+        when(adapter.executeQuery("sql")).thenReturn(rows(Map.of("value", 7)));
+        assertThat(new TGTemplate(adapter, resolver).executeQuery("sql", RecordResult.class))
+                .containsExactly(new RecordResult(7));
+    }
+
+    private static Object requestTypedResult(TGTemplate target, String terminal, Class<?> resultType) {
+        return switch (terminal) {
+            case "sql" -> target.executeQuery("sql", resultType);
+            case "list" -> target.query(Point.class).limit(1).list(resultType);
+            case "cursor" -> target.query(Point.class).limit(1).page(resultType);
+            case "strict" -> target.query(Point.class).limit(1).strictCursorPage(resultType);
+            case "offset" -> target.query(Point.class).page(1, 1, resultType);
+            case "offsetWithoutCount" -> target.query(Point.class).totalPageCount(false).page(1, 1, resultType);
+            default -> throw new IllegalArgumentException("Unknown terminal: " + terminal);
+        };
+    }
+
+    private record RecordResult(int value) { }
+
+    private abstract static class AbstractResult {
+        private static final AtomicInteger constructions = new AtomicInteger();
+        protected AbstractResult() { constructions.incrementAndGet(); }
+    }
+    private interface InterfaceResult { }
+
+
+    private static final class RecordAwareResolver implements TSDBMetadataResolver {
+        private final DefaultTSDBMetadataResolver delegate = new DefaultTSDBMetadataResolver();
+        @Override public TSDBEntityMetadata resolve(Class<?> entityType) { return delegate.resolve(entityType); }
+        @Override public TSDBRecord toRecord(Object source) { return delegate.toRecord(source); }
+        @Override public <T> T toEntity(Class<T> entityType, Map<String, Object> row) {
+            return entityType.cast(new RecordResult(((Number) row.get("value")).intValue()));
+        }
     }
 
     static class CustomMap extends LinkedHashMap<String, Object> {}

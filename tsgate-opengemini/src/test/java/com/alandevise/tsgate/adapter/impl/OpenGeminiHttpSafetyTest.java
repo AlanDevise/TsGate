@@ -7,6 +7,8 @@ import com.alandevise.tsgate.exception.TSDBException;
 import com.alandevise.tsgate.model.BatchCommitStateEnum;
 import com.alandevise.tsgate.model.BatchWriteResult;
 import com.alandevise.tsgate.model.TSDBQuery;
+import com.alandevise.tsgate.model.OperatorEnum;
+import com.alandevise.tsgate.model.QueryFilter;
 import com.alandevise.tsgate.model.TSDBRecord;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
@@ -17,7 +19,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -32,7 +36,7 @@ import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Exercises redirects, write replay prevention, and complete-batch byte budgets through a local HTTP peer. */
+/** Exercises transport, strict response parsing, and literal encoding through a local HTTP peer. */
 class OpenGeminiHttpSafetyTest {
     private HttpServer server;
     private OpenGeminiAdapter adapter;
@@ -386,5 +390,192 @@ class OpenGeminiHttpSafetyTest {
         assertUncommittedBeforeIo(List.of(new TSDBRecord("points", 1L, Map.of(), fields)));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void timeFiltersUseMillisecondsAndPreserveCaseDistinctFields(boolean countOnly) throws Exception {
+        TSDBQuery query = filteredQuery("time", 1783000000000L);
+        query.getFilters().add(new QueryFilter("TIME", OperatorEnum.EQ, List.of(7)));
+        completeEmptyRead(query, countOnly);
+        String sql = lastQuery();
+        assertTrue(sql.contains("\"time\" = '2026-07-02T13:46:40Z'"), sql);
+        assertTrue(sql.contains("\"TIME\" = 7"), sql);
 
+        int beforeInvalidTime = requests.size();
+        TSDBQuery textTimeQuery = filteredQuery("time", "1783000000000");
+        TSDBException error = assertThrows(TSDBException.class, () -> {
+            if (countOnly) adapter.count(null, textTimeQuery);
+            else adapter.query(null, textTimeQuery);
+        });
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR, error.getErrorCode());
+        assertEquals(beforeInvalidTime, requests.size());
+
+        TSDBQuery textFieldQuery = filteredQuery("v", "1783000000000");
+        completeEmptyRead(textFieldQuery, countOnly);
+        assertTrue(lastQuery().contains("\"v\" = '1783000000000'"), lastQuery());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"results\":[{}],\"results\":[{}]}",
+            "{\"results\":[{\"series\":[],\"series\":[]}]}",
+            "{\"results\":[{\"series\":[{\"columns\":[\"time\",\"v\"],\"tags\":{\"device\":\"a\",\"device\":\"b\"},\"values\":[[1,2]]}]}]}"
+    })
+    void duplicateJsonObjectKeysFailForEveryReadMode(String responseBody) {
+        for (int invocation = 0; invocation < 3; invocation++)
+            replies.add(new Reply(200, responseBody, null));
+        TSDBQuery query = new TSDBQuery();
+        query.setMeasurement("points");
+        List<Runnable> operations = List.of(
+                () -> adapter.query(null, query),
+                () -> adapter.count(null, query),
+                () -> adapter.executeQuery("SELECT * FROM points"));
+        for (Runnable operation : operations) {
+            TSDBException error = assertThrows(TSDBException.class, operation::run);
+            assertEquals(TSDBErrorCodeEnum.QUERY_ERROR, error.getErrorCode());
+            assertEquals("Invalid InfluxDB1 JSON response", error.getMessage());
+            assertInstanceOf(com.fasterxml.jackson.core.JsonProcessingException.class, error.getCause());
+        }
+        assertEquals(3, requests.size());
+    }
+
+    @Test
+    void equalTagNamesInSeparateSeriesRemainValid() {
+        String responseBody = "{\"results\":[{\"series\":["
+                + "{\"columns\":[\"time\",\"v\"],\"tags\":{\"device\":\"a\"},\"values\":[[1,2]]},"
+                + "{\"columns\":[\"time\",\"v\"],\"tags\":{\"device\":\"b\"},\"values\":[[2,3]]}]}]}";
+        replies.add(new Reply(200, responseBody, null));
+        replies.add(new Reply(200, responseBody, null));
+        TSDBQuery query = new TSDBQuery();
+        query.setMeasurement("points");
+        assertEquals(2, adapter.query(null, query).getRowCount());
+        assertEquals(2L, adapter.count(null, query));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void precisionValidationAndSqlUseOneFrozenNumericOperand(boolean countOnly) throws Exception {
+        ChangingNumber number = new ChangingNumber("7", "9007199254740993", "0 OR true --");
+        TSDBQuery query = filteredQuery("v", number);
+        QueryFilter originalFilter = query.getFilters().get(0);
+        completeEmptyRead(query, countOnly);
+        assertEquals(1, number.reads);
+        assertTrue(lastQuery().contains("\"v\" = 7"), lastQuery());
+        assertSame(originalFilter, query.getFilters().get(0));
+        assertSame(number, originalFilter.values().get(0));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void frozenOutOfPrecisionIntegersStillFailBeforeHttp(boolean countOnly) {
+        ChangingNumber number = new ChangingNumber("9007199254740993", "7");
+        TSDBQuery query = filteredQuery("v", number);
+        TSDBException error = assertThrows(TSDBException.class, () -> {
+            if (countOnly) adapter.count(null, query);
+            else adapter.query(null, query);
+        });
+        assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR, error.getErrorCode());
+        assertEquals(1, number.reads);
+        assertTrue(requests.isEmpty());
+        assertSame(number, query.getFilters().get(0).values().get(0));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void timestampOperandsAvoidOrdinaryFieldFloat64PrecisionChecks(boolean countOnly) throws Exception {
+        long millis = 9007199254740993L;
+        TSDBQuery query = filteredQuery("time", millis);
+        completeEmptyRead(query, countOnly);
+        assertTrue(lastQuery().contains("\"time\" = '" + Instant.ofEpochMilli(millis) + "'"), lastQuery());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void floatingPointFiltersKeepTheirExistingPrecisionException(boolean countOnly) throws Exception {
+        TSDBQuery query = filteredQuery("v", Double.MAX_VALUE);
+        completeEmptyRead(query, countOnly);
+        assertTrue(lastQuery().contains("\"v\" = 1.7976931348623157E+308"), lastQuery());
+        assertInstanceOf(Double.class, query.getFilters().get(0).values().get(0));
+    }
+
+    private static final class ChangingNumber extends Number {
+        private final String[] values;
+        private int reads;
+
+        private ChangingNumber(String... values) {
+            this.values = values;
+        }
+
+        @Override public int intValue() { return 0; }
+        @Override public long longValue() { return 0L; }
+        @Override public float floatValue() { return 0F; }
+        @Override public double doubleValue() { return 0D; }
+
+        @Override
+        public String toString() {
+            return values[Math.min(reads++, values.length - 1)];
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"NE", "IN"})
+    void unsupportedPrimaryTimeFiltersFailBeforeQueryOrCountIo(String operatorName) {
+        OperatorEnum operator = OperatorEnum.valueOf(operatorName);
+        for (boolean instant : List.of(false, true)) {
+            List<Object> values = operator == OperatorEnum.IN
+                    ? List.of(1783000000000L, 1783000000002L) : List.of(1783000000001L);
+            if (instant) values = values.stream().map(value -> (Object) Instant.ofEpochMilli((Long) value)).toList();
+            TSDBQuery query = new TSDBQuery();
+            query.setMeasurement("points");
+            query.setFilters(List.of(new QueryFilter("time", operator, values)));
+            for (boolean countOnly : List.of(false, true)) {
+                TSDBException error = assertThrows(TSDBException.class, () -> {
+                    if (countOnly) adapter.count(null, query);
+                    else adapter.query(null, query);
+                });
+                assertEquals(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION, error.getErrorCode());
+                assertTrue(error.getMessage().contains("primary-time NE and IN"), error.getMessage());
+                assertTrue(requests.isEmpty());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"NE", "IN"})
+    void ordinaryFieldsKeepExistingNotEqualAndMembershipSql(String operatorName) throws Exception {
+        OperatorEnum operator = OperatorEnum.valueOf(operatorName);
+        for (String column : List.of("v", "TIME")) {
+            for (boolean countOnly : List.of(false, true)) {
+                TSDBQuery query = new TSDBQuery();
+                query.setMeasurement("points");
+                query.setFilters(List.of(new QueryFilter(column, operator,
+                        operator == OperatorEnum.IN ? List.of(1, 3) : List.of(1))));
+                completeEmptyRead(query, countOnly);
+                String expected = operator == OperatorEnum.NE ? "\"" + column + "\" != 1"
+                        : "(\"" + column + "\" = 1 OR \"" + column + "\" = 3)";
+                assertTrue(lastQuery().contains(expected), lastQuery());
+            }
+        }
+    }
+
+    private static TSDBQuery filteredQuery(String column, Object value) {
+        TSDBQuery query = new TSDBQuery();
+        query.setMeasurement("points");
+        query.setFilters(List.of(new QueryFilter(column, OperatorEnum.EQ, List.of(value))));
+        return query;
+    }
+
+    private void completeEmptyRead(TSDBQuery query, boolean countOnly) {
+        replies.add(new Reply(200, "{\"results\":[{}]}", null));
+        if (countOnly) assertEquals(0L, adapter.count(null, query));
+        else assertTrue(adapter.query(null, query).isSuccess());
+    }
+
+    private String lastQuery() {
+        String form = new String(requests.get(requests.size() - 1).body(), StandardCharsets.UTF_8);
+        for (String field : form.split("&")) {
+            if (field.startsWith("q=")) return URLDecoder.decode(field.substring(2), StandardCharsets.UTF_8);
+        }
+        fail("Missing query form parameter: " + form);
+        return "";
+    }
 }

@@ -50,6 +50,74 @@ class DefaultTSDBMetadataResolverReadPlanTest {
         assertThat(omitted).isNotSameAs(second);
     }
 
+    @Test void caseInsensitiveDtoMatchWinsBeforeNormalizedNamesInEitherColumnOrder() {
+        for (boolean snakeFirst : List.of(true, false)) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            if (snakeFirst) {
+                row.put("foo_bar", 1);
+                row.put("FOOBAR", 2);
+            } else {
+                row.put("FOOBAR", 2);
+                row.put("foo_bar", 1);
+            }
+            assertThat(resolver.toEntity(CollisionDto.class, row).fooBar).isEqualTo(2);
+            row.put("foo_bar", null);
+            assertThat(resolver.toEntity(CollisionDto.class, row).fooBar).isEqualTo(2);
+            row.put("FOOBAR", null);
+            row.put("foo_bar", 1);
+            assertThat(resolver.toEntity(CollisionDto.class, row).fooBar).isNull();
+            row.put("fooBar", null);
+            row.put("FOOBAR", 2);
+            assertThat(resolver.toEntity(CollisionDto.class, row).fooBar).isNull();
+        }
+        assertThat(resolver.toEntity(CollisionDto.class, Map.of("foo_bar", 1)).fooBar).isEqualTo(1);
+        assertThat(resolver.toEntity(CollisionDto.class, Map.of()).fooBar).isEqualTo(7);
+    }
+
+    @Test void eachLooseIndexPreservesItsFirstMatchIncludingNulls() {
+        Map<String, Object> lowercase = new LinkedHashMap<>();
+        lowercase.put("FOOBAR", null);
+        lowercase.put("foobar", 2);
+        assertThat(resolver.toEntity(CollisionDto.class, lowercase).fooBar).isNull();
+        Map<String, Object> normalized = new LinkedHashMap<>();
+        normalized.put("foo_bar", null);
+        normalized.put("f_o_o_b_a_r", 2);
+        assertThat(resolver.toEntity(CollisionDto.class, normalized).fooBar).isNull();
+    }
+
+    @Test void resultTypePreflightWarmsReadPlansWithoutConstructingObjects() {
+        ConcurrentDto.constructions.set(0);
+        resolver.validateResultType(ConcurrentDto.class);
+        resolver.validateResultType(ConcurrentDto.class);
+        assertThat(ConcurrentDto.constructions).hasValue(0);
+        assertThat(resolver.toEntity(ConcurrentDto.class, Map.of("reading", 2.5)).reading).isEqualTo(2.5);
+        assertThat(ConcurrentDto.constructions).hasValue(1);
+        resolver.validateResultType(ReadOnlyDto.class);
+        assertThat(resolver.toEntity(ReadOnlyDto.class, Map.of("reading", 3.5)).value).isEqualTo(3.5);
+    }
+
+    @Test void resultTypePreflightReportsMissingConstructorsAndNullTypes() {
+        TSDBException failure = assertThrows(TSDBException.class,
+                () -> resolver.validateResultType(RecordDto.class));
+        assertThat(failure.getErrorCode()).isEqualTo(TSDBErrorCodeEnum.METADATA_ERROR);
+        assertThat(failure).hasMessageContaining("no-args constructor")
+                .hasCauseInstanceOf(NoSuchMethodException.class);
+        assertThat(assertThrows(TSDBException.class, () -> resolver.validateResultType(null)).getErrorCode())
+                .isEqualTo(TSDBErrorCodeEnum.ARGUMENT_ERROR);
+    }
+
+    @Test void resultTypePreflightRejectsAbstractClassesAndInterfacesWithoutConstruction() {
+        AbstractDto.constructions.set(0);
+        for (Class<?> resultType : List.of(AbstractDto.class, InterfaceDto.class)) {
+            TSDBException failure = assertThrows(TSDBException.class,
+                    () -> resolver.validateResultType(resultType));
+            assertThat(failure.getErrorCode()).isEqualTo(TSDBErrorCodeEnum.METADATA_ERROR);
+            assertThat(failure).hasMessageContaining(resultType.getName())
+                    .hasMessageContaining("concrete result class");
+        }
+        assertThat(AbstractDto.constructions).hasValue(0);
+    }
+
     @Test void annotatedReadPlansRemainIndependentFromWriteModelValidation() {
         ReadOnlyDto first = resolver.toEntity(ReadOnlyDto.class,
                 Map.of("EVENT_TIME", 12L, "DEVICE_ID", "a", "READING", 3.5));
@@ -148,6 +216,15 @@ class DefaultTSDBMetadataResolverReadPlanTest {
         assertThat(secondType.getField("value").get(second)).isEqualTo(8L);
         assertThatThrownBy(() -> firstType.cast(second)).isInstanceOf(ClassCastException.class);
     }
+
+    private static class CollisionDto { private Integer fooBar = 7; }
+    private record RecordDto(int value) { }
+    private abstract static class AbstractDto {
+        private static final AtomicInteger constructions = new AtomicInteger();
+        protected AbstractDto() { constructions.incrementAndGet(); }
+    }
+    private interface InterfaceDto { }
+
 
     private static class PlainBase { private int baseCount = 5; }
     private static class PlainDto extends PlainBase {

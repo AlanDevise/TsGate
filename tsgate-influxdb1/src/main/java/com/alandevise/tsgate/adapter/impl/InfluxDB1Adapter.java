@@ -9,6 +9,7 @@ import com.alandevise.tsgate.metadata.DefaultTSDBMetadataResolver;
 import com.alandevise.tsgate.util.TimeWindowDuration;
 import com.alandevise.tsgate.util.TimeWindowPlan;
 import com.alandevise.tsgate.util.TSDBQueryValidator;
+import com.alandevise.tsgate.util.QueryLiteralSupport;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.JsonToken;
@@ -371,6 +372,10 @@ public class InfluxDB1Adapter implements TSDBAdapter {
     /**
      * Executes the common query model with bounded results and time-only ordering.
      * Strict composite cursors are unsupported; time windows require explicit time bounds.
+     * Primary-time Number filters use exact whole epoch milliseconds; Instant filters use millisecond precision.
+     * Primary-time NE and IN filters are unsupported by this InfluxQL backend.
+     * Primary-time operands must be Number or Instant; text is not inferred as a timestamp.
+     * Non-time text operands retain their existing literal meaning.
      *
      * @param database target database; null or blank selects the configured default
      * @param query common query model; pagination probes may read one row beyond the configured cap
@@ -463,6 +468,7 @@ public class InfluxDB1Adapter implements TSDBAdapter {
 
     /**
      * Parses the envelope and each values array incrementally, never materializing all series.
+     * Duplicate JSON object keys are rejected at every nesting level.
      */
     private ReadResult readResponse(Response response, int rowLimit, boolean countOnly) throws IOException {
         QueryResult result = new QueryResult();
@@ -474,6 +480,7 @@ public class InfluxDB1Adapter implements TSDBAdapter {
             throw responseLimitExceeded("response bytes", maxQueryResponseBytes);
         try (InputStream input = new BoundedResponseInputStream(response.body().byteStream(), maxQueryResponseBytes);
              JsonParser parser = objectMapper.getFactory().createParser(input)) {
+            parser.enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
             requireToken(parser.nextToken(), JsonToken.START_OBJECT);
             boolean foundResults = false;
             while (parser.nextToken() != JsonToken.END_OBJECT) {
@@ -674,35 +681,40 @@ public class InfluxDB1Adapter implements TSDBAdapter {
         if (filter == null || isBlank(filter.column()) || filter.operator() == null || filter.values() == null || filter.values().isEmpty())
             throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "Invalid InfluxDB1 query filter");
         String column = quoteIdentifier(filter.column());
+        boolean timeColumn = "time".equals(filter.column());
+        if (timeColumn && (filter.operator() == OperatorEnum.NE || filter.operator() == OperatorEnum.IN)) {
+            throw unsupported("InfluxQL primary-time NE and IN filters are unsupported");
+        }
         List<Object> values = filter.values();
         if (values.stream().anyMatch(Objects::isNull))
             throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "InfluxQL filter values must not be null");
         return switch (filter.operator()) {
-            case EQ -> column + " = " + formatValue(values.get(0));
-            case NE -> column + " != " + formatValue(values.get(0));
-            case GT -> column + " > " + formatValue(values.get(0));
-            case GE -> column + " >= " + formatValue(values.get(0));
-            case LT -> column + " < " + formatValue(values.get(0));
-            case LE -> column + " <= " + formatValue(values.get(0));
+            case EQ -> column + " = " + formatFilterValue(values.get(0), timeColumn);
+            case NE -> column + " != " + formatFilterValue(values.get(0), timeColumn);
+            case GT -> column + " > " + formatFilterValue(values.get(0), timeColumn);
+            case GE -> column + " >= " + formatFilterValue(values.get(0), timeColumn);
+            case LT -> column + " < " + formatFilterValue(values.get(0), timeColumn);
+            case LE -> column + " <= " + formatFilterValue(values.get(0), timeColumn);
             case IN ->
-                    "(" + String.join(" OR ", values.stream().map(value -> column + " = " + formatValue(value)).toList()) + ")";
+                    "(" + String.join(" OR ", values.stream().map(value -> column + " = " + formatFilterValue(value, timeColumn)).toList()) + ")";
             case BETWEEN -> {
                 if (values.size() != 2)
                     throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "BETWEEN requires exactly two values");
-                yield "(" + column + " >= " + formatValue(values.get(0)) + " AND " + column + " <= " + formatValue(values.get(1)) + ")";
+                yield "(" + column + " >= " + formatFilterValue(values.get(0), timeColumn) + " AND " + column + " <= " + formatFilterValue(values.get(1), timeColumn) + ")";
             }
         };
     }
 
-    private static String formatValue(Object value) {
-        if (value instanceof Number number) {
-            try {
-                new BigDecimal(number.toString());
-            } catch (NumberFormatException e) {
-                throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "Non-finite query number", e);
-            }
-            return number.toString();
+    /** Formats primary-time numeric and Instant operands with the common epoch-millisecond contract. */
+    private static String formatFilterValue(Object value, boolean timeColumn) {
+        if (timeColumn) {
+            return timeLiteral(QueryLiteralSupport.exactEpochMillis(value));
         }
+        return formatValue(value);
+    }
+
+    private static String formatValue(Object value) {
+        if (value instanceof Number number) return QueryLiteralSupport.numericLiteral(number);
         if (value instanceof Boolean) return value.toString();
         return sqlString(String.valueOf(value));
     }

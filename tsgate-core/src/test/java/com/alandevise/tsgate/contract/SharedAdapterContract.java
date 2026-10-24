@@ -32,6 +32,9 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.time.Instant;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -41,6 +44,128 @@ import static org.junit.jupiter.api.Assertions.*;
 public interface SharedAdapterContract {
     String backendId();
     SharedAdapterFixture createFixture() throws Exception;
+
+    @ParameterizedTest
+    @EnumSource(OperatorEnum.class)
+    default void sharedNumericLiteralsUseOneCheckedReadForQueryAndCount(OperatorEnum operator) throws Exception {
+        for (boolean count : List.of(false, true)) {
+            try (SharedAdapterFixture fixture = createFixture()) {
+                fixture.initialize();
+                AtomicInteger reads = new AtomicInteger();
+                Number changing = queryNumber(() -> reads.incrementAndGet() == 1 ? "17" : "0 OR true --");
+                TSDBQuery query = detail();
+                List<Object> operands = operator == OperatorEnum.IN || operator == OperatorEnum.BETWEEN
+                        ? List.of(changing, 18) : List.of(changing);
+                query.setFilters(List.of(new QueryFilter("value", operator, operands)));
+                if (count) {
+                    fixture.enqueueCount(0);
+                    assertEquals(0L, fixture.adapter().count(null, query));
+                } else {
+                    fixture.enqueueRows();
+                    assertTrue(fixture.adapter().query(null, query).isSuccess());
+                }
+                assertEquals(1, reads.get(), "Precision checks and SQL must share one stable operand");
+                assertTrue(fixture.lastQuerySql().contains("17"), fixture.lastQuerySql());
+                assertFalse(fixture.lastQuerySql().contains("OR true --"), fixture.lastQuerySql());
+                assertSame(changing, query.getFilters().get(0).values().get(0), "Do not rewrite caller-owned values");
+
+                Number malicious = queryNumber(() -> "0 OR true --");
+                query.setFilters(List.of(new QueryFilter("value", operator,
+                        operator == OperatorEnum.IN || operator == OperatorEnum.BETWEEN
+                                ? List.of(malicious, 18) : List.of(malicious))));
+                assertError(TSDBErrorCodeEnum.ARGUMENT_ERROR, () -> {
+                    if (count) fixture.adapter().count(null, query); else fixture.adapter().query(null, query);
+                });
+                assertEquals(1, fixture.ioCount());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(OperatorEnum.class)
+    default void sharedTimeFiltersUseMillisecondsForEveryOperatorAndCount(OperatorEnum operator) throws Exception {
+        long time = 1_783_000_000_001L;
+        for (boolean instant : List.of(false, true)) {
+            try (SharedAdapterFixture fixture = createFixture()) {
+                fixture.initialize();
+                Object first = instant ? Instant.ofEpochMilli(time) : time;
+                Object second = instant ? Instant.ofEpochMilli(time + 1) : time + 1;
+                TSDBQuery query = detail();
+                query.setStartTime(time - 10);
+                query.setEndTime(time + 10);
+                QueryFilter filter = new QueryFilter("time", operator,
+                        operator == OperatorEnum.IN || operator == OperatorEnum.BETWEEN
+                                ? List.of(first, second) : List.of(first));
+                query.setFilters(List.of(filter));
+                BackendCapability capability = switch (operator) {
+                    case NE -> BackendCapability.TIME_FILTER_NE;
+                    case IN -> BackendCapability.TIME_FILTER_IN;
+                    default -> null;
+                };
+                if (capability != null && !BackendContractRegistry.profile(backendId()).supports(capability)) {
+                    assertError(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION, () -> fixture.adapter().query(null, query));
+                    assertError(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION, () -> fixture.adapter().count(null, query));
+                    assertEquals(List.of(filter), query.getFilters());
+                    assertEquals(0, fixture.ioCount(), "Unsupported time operators must not submit HTTP or RPC requests");
+                    continue;
+                }
+                fixture.enqueueRows();
+                assertTrue(fixture.adapter().query(null, query).isSuccess());
+                assertTimeLiteral(fixture.lastQuerySql(), backendId(), time);
+                fixture.enqueueCount(0);
+                query.setCursorTime(123L);
+                query.setLimit(0);
+                query.setOffset(-1);
+                assertEquals(0L, fixture.adapter().count(null, query));
+                assertTimeLiteral(fixture.lastQuerySql(), backendId(), time);
+                if (operator == OperatorEnum.IN || operator == OperatorEnum.BETWEEN) {
+                    assertTimeLiteral(fixture.lastQuerySql(), backendId(), time + 1);
+                }
+                assertEquals(List.of(filter), query.getFilters());
+                assertEquals(123L, query.getCursorTime());
+                assertEquals(2, fixture.ioCount());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"fraction", "overflow", "text", "instant-overflow", "boolean", "nan", "infinity"})
+    default void sharedInvalidTimeFiltersFailBeforeQueryAndCountIo(String scenario) throws Exception {
+        try (SharedAdapterFixture fixture = createFixture()) {
+            fixture.initialize();
+            Object value = switch (scenario) {
+                case "fraction" -> new BigDecimal("1.1");
+                case "overflow" -> new BigInteger("9223372036854775808");
+                case "text" -> "1783000000001";
+                case "instant-overflow" -> Instant.MAX;
+                case "boolean" -> true;
+                case "nan" -> Double.NaN;
+                case "infinity" -> Double.POSITIVE_INFINITY;
+                default -> throw new AssertionError(scenario);
+            };
+            TSDBQuery query = detail();
+            query.setFilters(List.of(new QueryFilter("time", OperatorEnum.EQ, List.of(value))));
+            assertError(TSDBErrorCodeEnum.ARGUMENT_ERROR, () -> fixture.adapter().query(null, query));
+            assertError(TSDBErrorCodeEnum.ARGUMENT_ERROR, () -> fixture.adapter().count(null, query));
+            assertEquals(0, fixture.ioCount());
+        }
+    }
+
+    private static void assertTimeLiteral(String sql, String backend, long time) {
+        String expected = backend.equals("iotdb") ? Long.toString(time) : Instant.ofEpochMilli(time).toString();
+        assertTrue(sql.contains(expected), sql);
+        if (!backend.equals("iotdb")) assertFalse(sql.contains(Long.toString(time)), sql);
+    }
+
+    private static Number queryNumber(java.util.function.Supplier<String> text) {
+        return new Number() {
+            @Override public int intValue() { return 17; }
+            @Override public long longValue() { return 17; }
+            @Override public float floatValue() { return 17; }
+            @Override public double doubleValue() { return 17; }
+            @Override public String toString() { return text.get(); }
+        };
+    }
 
     @ParameterizedTest
     @ValueSource(strings = {"null", "zero-limit", "negative-limit", "negative-offset", "reversed-time"})

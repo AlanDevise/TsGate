@@ -28,7 +28,15 @@ class MatrixRunnerTest(unittest.TestCase):
         self.root_patch = patch.object(matrix, "ROOT", self.root)
         self.root_patch.start()
         self.addCleanup(self.root_patch.stop)
-        registration = patch.object(matrix.runpy, "run_path", return_value={"verify": lambda root: {"status": "passed"}})
+        self.capability_cases = ["capabilityBatchWriteRoundTripsRows", "capabilityFieldSortReturnsExpectedRows",
+                                 "capabilityStrictCompositeCursorReturnsEveryPoint", "capabilityRegionalCalendarDayReturnsExpectedWindows",
+                                 "capabilityTimeNotEqualReturnsExpectedRows", "capabilityTimeInReturnsExpectedRows"]
+        self.report_plan = dict(requiredSuites=[dict(module=module, name=name,
+                                                    requiredCases=self.capability_cases if module == "tsgate-opengemini" else [])
+                                                for module, name in matrix.MODULES.items()],
+                                allowedSuites=[dict(module=module, name=name) for module, name in matrix.MODULES.items()])
+        registration = patch.object(matrix.runpy, "run_path", return_value={
+            "verify": lambda root: {"status": "passed", "dockerReports": {"opengemini": self.report_plan}}})
         registration.start()
         self.addCleanup(registration.stop)
         self.args = argparse.Namespace(spring_boot="2.7.18", maven_repo=None, offline=False,
@@ -48,8 +56,14 @@ class MatrixRunnerTest(unittest.TestCase):
         directory.mkdir(parents=True, exist_ok=True)
         name = name or matrix.MODULES[module]
         report = directory / ("TEST-" + name + ".xml")
-        report.write_text('<testsuite name="%s" tests="%d" failures="%d" errors="%d" skipped="%d"/>'
-                          % (name, tests, failures, errors, skipped))
+        case_names = (self.capability_cases if module == "tsgate-opengemini" else [])[:tests]
+        case_names += ["roundTrip" + str(index) for index in range(tests - len(case_names))]
+        cases = []
+        for index, case_name in enumerate(case_names):
+            child = "<failure/>" if index < failures else "<error/>" if index < failures + errors else "<skipped/>" if index < failures + errors + skipped else ""
+            cases.append('<testcase name="%s" classname="%s">%s</testcase>' % (case_name, name, child))
+        report.write_text('<testsuite name="%s" tests="%d" failures="%d" errors="%d" skipped="%d">%s</testsuite>'
+                          % (name, tests, failures, errors, skipped, "".join(cases)))
         if timestamp is not None:
             os.utime(report, ns=(timestamp, timestamp))
         return report
@@ -102,20 +116,40 @@ class MatrixRunnerTest(unittest.TestCase):
         for counter in ("failures", "errors", "skipped"):
             with self.subTest(counter=counter):
                 self.report(modules[0], timestamp=200, **{counter: 1})
-                with self.assertRaisesRegex(RuntimeError, "Failing"):
+                with self.assertRaisesRegex(RuntimeError, "failing"):
                     matrix.validate_reports(matrix.collect_reports(self.root / counter, 100))
         self.report(modules[0], tests=0, timestamp=200)
-        with self.assertRaisesRegex(RuntimeError, "nonempty"):
+        with self.assertRaisesRegex(RuntimeError, "Empty"):
             matrix.validate_reports(matrix.collect_reports(self.root / "empty", 100))
         self.report(modules[0], tests=7, timestamp=200)
         extra = self.report(modules[0], name="unexpected.Suite", timestamp=200)
-        with self.assertRaisesRegex(RuntimeError, "Both selected"):
+        with self.assertRaisesRegex(RuntimeError, "Unexpected|Missing required"):
             matrix.validate_reports(matrix.collect_reports(self.root / "extra", 100))
         extra.unlink()
         for report in (self.root / modules[1] / "target/failsafe-reports").glob("TEST-*.xml"):
             report.unlink()
-        with self.assertRaisesRegex(RuntimeError, "Both selected"):
+        with self.assertRaisesRegex(RuntimeError, "Unexpected|Missing required"):
             matrix.validate_reports(matrix.collect_reports(self.root / "missing", 100))
+
+    def test_nonempty_adapter_suite_must_report_every_real_capability_case(self):
+        self.write_selected_reports(timestamp=200)
+        self.report("tsgate-opengemini", tests=3, timestamp=200)
+        with self.assertRaisesRegex(RuntimeError, "Missing real capability cases"):
+            matrix.validate_reports(matrix.collect_reports(self.root / "missing-capability", 100))
+
+    def test_each_time_filter_capability_case_must_appear_in_the_adapter_report(self):
+        for missing in ("capabilityTimeNotEqualReturnsExpectedRows", "capabilityTimeInReturnsExpectedRows"):
+            with self.subTest(missing=missing):
+                self.write_selected_reports(timestamp=200)
+                path = self.root / "tsgate-opengemini/target/failsafe-reports" / ("TEST-" + matrix.MODULES["tsgate-opengemini"] + ".xml")
+                tree = matrix.ET.parse(path)
+                suite = tree.getroot()
+                suite.remove(next(case for case in suite.findall("testcase") if case.get("name") == missing))
+                suite.set("tests", str(int(suite.get("tests")) - 1))
+                tree.write(path, encoding="unicode")
+                os.utime(path, ns=(200, 200))
+                with self.assertRaisesRegex(RuntimeError, missing):
+                    matrix.validate_reports(matrix.collect_reports(self.root / missing, 100))
 
     def test_deployment_requires_ready_binary_version_replica_and_owned_url_evidence(self):
         path = self.root / "state.json"

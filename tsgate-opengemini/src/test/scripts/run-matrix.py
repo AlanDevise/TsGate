@@ -32,6 +32,12 @@ MODULES = {
 }
 LABEL = "com.alandevise.tsgate.opengemini.fixture"
 COUNTERS = ("tests", "failures", "errors", "skipped")
+DOCKER_REPORTS = runpy.run_path(str(ROOT / "tsgate-core/src/test/scripts/docker-reports.py"))
+
+
+def registered_report_plan():
+    registration = runpy.run_path(str(ROOT / "tsgate-core/src/test/scripts/verify-backend-registration.py"))
+    return registration["verify"](ROOT)["dockerReports"]["opengemini"]
 
 
 def selected_matrix(mode=None):
@@ -186,45 +192,11 @@ def maven_command(args, state, version):
 
 
 def collect_reports(output, started_ns):
-    """Never aggregate other modules or files predating this specific Maven invocation."""
-    result = dict(totals=dict.fromkeys(COUNTERS, 0), suites=[], staleReports=[])
-    for module in MODULES:
-        source = ROOT / module / "target/failsafe-reports"
-        if not source.is_dir():
-            continue
-        destination = output / "reports" / module / "failsafe-reports"
-        for report in sorted(source.iterdir()):
-            if not report.is_file():
-                continue
-            if report.stat().st_mtime_ns < started_ns:
-                if report.name.startswith("TEST-") and report.suffix == ".xml":
-                    result["staleReports"].append(str(report.relative_to(ROOT)))
-                continue
-            destination.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(report, destination / report.name)
-            if not report.name.startswith("TEST-") or report.suffix != ".xml":
-                continue
-            xml = ET.parse(report).getroot()
-            if xml.tag != "testsuite":
-                raise RuntimeError("Unexpected Failsafe report envelope: " + str(report))
-            suite = {key: int(xml.get(key, "0")) for key in COUNTERS}
-            if any(value < 0 for value in suite.values()):
-                raise RuntimeError("Negative test counter: " + str(report))
-            for key in COUNTERS:
-                result["totals"][key] += suite[key]
-            result["suites"].append(dict(module=module, name=xml.get("name"),
-                                          report=str(destination / report.name), **suite))
-    return result
+    return DOCKER_REPORTS["collect_reports"](ROOT, output, started_ns, registered_report_plan())
 
 
 def validate_reports(result):
-    if result["staleReports"]:
-        raise RuntimeError("Rejected stale Failsafe reports: " + ", ".join(result["staleReports"]))
-    suites = {(suite["module"], suite["name"]) for suite in result["suites"] if suite["tests"] > 0}
-    if suites != set(MODULES.items()) or len(result["suites"]) != len(MODULES):
-        raise RuntimeError("Both selected openGemini Docker test classes must produce current, nonempty reports")
-    if result["totals"]["tests"] == 0 or any(result["totals"][key] for key in ("failures", "errors", "skipped")):
-        raise RuntimeError("Failing, erroneous or skipped openGemini Docker tests")
+    DOCKER_REPORTS["validate_reports"](result, registered_report_plan())
 
 
 def cleanup(state_path, output, timeout):

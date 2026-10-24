@@ -35,6 +35,18 @@ public interface TSDBMetadataResolver {
     TSDBRecord toRecord(Object source);
 
     /**
+     * Validates and prepares row-independent result mapping before a query or count request.
+     * <p>The default implementation does nothing so existing custom resolvers retain their mapping rules.
+     * Implementations may reject unsupported result types or cache mapping plans, but must not construct
+     * result objects, inspect result rows, or perform database I/O. The template handles supported Map
+     * result types itself and does not pass them to this method.</p>
+     *
+     * @param resultType non-null result class, for example {@code ValueOnlyResult.class}
+     */
+    default void validateResultType(Class<?> resultType) {
+    }
+
+    /**
      * Maps one adapter result row to the requested result object.
      * <p>Result classes need not declare TSDB annotations. Annotated fields use physical column names;
      * unannotated fields also support Java names, snake_case, and common time aliases.</p>

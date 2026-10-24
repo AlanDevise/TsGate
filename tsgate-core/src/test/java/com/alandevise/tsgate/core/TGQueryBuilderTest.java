@@ -64,6 +64,45 @@ class TGQueryBuilderTest {
                 new QueryFilter("value", OperatorEnum.GE, List.of(10)));
     }
 
+    @Test void tagFiltersUseWriteCompatibleStringsWhileFieldFiltersKeepTheirTypes() {
+        TSDBQuery query = builder().whereTag(" device_code ", 42)
+                .whereTag("enabled", true)
+                .whereTag("special", Double.NaN)
+                .where("value", OperatorEnum.GE, 42)
+                .build();
+        assertThat(query.getFilters()).containsExactly(
+                new QueryFilter("device_code", OperatorEnum.EQ, List.of("42")),
+                new QueryFilter("enabled", OperatorEnum.EQ, List.of("true")),
+                new QueryFilter("special", OperatorEnum.EQ, List.of("NaN")),
+                new QueryFilter("value", OperatorEnum.GE, List.of(42)));
+    }
+
+    @Test void tagFiltersPreserveEmptyStringsWhitespaceOrderAndDuplicatesInSnapshots() {
+        StringBuilder mutable = new StringBuilder("original");
+        List<Object> values = new ArrayList<>(Arrays.asList(42, null, true, "", " a ", 42, mutable));
+        TGQueryBuilder<?> builder = builder().whereTag("empty", "")
+                .whereTag("whitespace", " a ").whereTag("mutable", mutable)
+                .whereTagIn("device_code", values);
+        values.clear();
+        mutable.append(" changed");
+        assertThat(builder.build().getFilters()).containsExactly(
+                new QueryFilter("empty", OperatorEnum.EQ, List.of("")),
+                new QueryFilter("whitespace", OperatorEnum.EQ, List.of(" a ")),
+                new QueryFilter("mutable", OperatorEnum.EQ, List.of("original")),
+                new QueryFilter("device_code", OperatorEnum.IN,
+                        List.of("42", "true", "", " a ", "42", "original")));
+    }
+
+    @Test void absentTagInputsStillDoNotAddFilters() {
+        TSDBQuery query = builder().whereTag(null, 42).whereTag(" ", 42)
+                .whereTag("device_code", null)
+                .whereTagIn(null, List.of(42)).whereTagIn(" ", List.of(42))
+                .whereTagIn("device_code", null).whereTagIn("device_code", List.of())
+                .whereTagIn("device_code", Arrays.asList(null, null))
+                .build();
+        assertThat(query.getFilters()).isEmpty();
+    }
+
     @Test void timeRangesPreserveOpenBoundsAndConvertInstants() {
         TGQueryBuilder<?> builder = builder().timeRange(Instant.ofEpochMilli(12L), Instant.ofEpochMilli(25L));
         assertThat(builder.build().getStartTime()).isEqualTo(12L);

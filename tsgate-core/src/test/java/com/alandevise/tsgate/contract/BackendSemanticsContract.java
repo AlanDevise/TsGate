@@ -6,7 +6,12 @@ import com.alandevise.tsgate.exception.TSDBErrorCodeEnum;
 import com.alandevise.tsgate.exception.TSDBException;
 import com.alandevise.tsgate.model.AggregationFunctionEnum;
 import com.alandevise.tsgate.model.AggregationSpec;
+import com.alandevise.tsgate.model.BatchWriteResult;
+import com.alandevise.tsgate.model.SortOrderEnum;
+import com.alandevise.tsgate.model.SortSpec;
 import com.alandevise.tsgate.model.PageResult;
+import com.alandevise.tsgate.model.OperatorEnum;
+import com.alandevise.tsgate.model.QueryFilter;
 import com.alandevise.tsgate.model.TSDBQuery;
 import com.alandevise.tsgate.model.TSDBRecord;
 import org.junit.jupiter.api.Test;
@@ -26,6 +31,9 @@ import static org.junit.jupiter.api.Assertions.*;
  * and assert their explicitly declared behavior, including append-only behavior where applicable.
  */
 public interface BackendSemanticsContract {
+    String semanticsBackendId();
+    String semanticsServerVersion();
+    String semanticsProtocol();
     TSDBAdapter semanticsAdapter();
     TGQueryBuilder<?> semanticsQuery();
     String semanticsMeasurement();
@@ -34,6 +42,271 @@ public interface BackendSemanticsContract {
 
     /** Establishes the exact expected points without replaying writes or changing adapter query behavior. */
     void awaitSemanticsVisibility(List<TSDBRecord> expected);
+
+    /** Reports only the settings used to construct this test fixture's adapter. */
+    default Map<String, String> semanticsConfiguration() { return Map.of(); }
+
+    /** Applies version-specific prerequisites locally; modern fixtures retain their normal settings. */
+    default void prepareSemanticsCapability(BackendCapability capability) { }
+
+    @Test
+    default void capabilityBatchWriteRoundTripsRows() {
+        if (!supportsSemanticsCapability(BackendCapability.BATCH_WRITE)) {
+            assertEquals(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION,
+                    assertThrows(TSDBException.class, () -> semanticsAdapter().batchWrite(null, groupedPoints())).getErrorCode());
+            return;
+        }
+        List<TSDBRecord> expected = groupedPoints();
+        BatchWriteResult result = semanticsAdapter().batchWriteDetailed(null, expected);
+        assertTrue(result.isSuccess());
+        assertEquals(expected.size(), result.requestedRecords());
+        assertEquals(expected.size(), result.validatedRecords());
+        assertEquals(expected.size(), result.committedRecords());
+        assertEquals(result.totalBatches(), result.committedBatches());
+        awaitSemanticsVisibility(expected);
+        List<Map<String, Object>> actual = semanticsAdapter().query(null, detailQuery()).getRows();
+        assertEquals(expected.size(), actual.size());
+        for (int index = 0; index < expected.size(); index++) {
+            assertEquals(expected.get(index).timestamp(), actual.get(index).get("time"));
+            assertEquals(expected.get(index).tags().get("device"), actual.get(index).get("device"));
+            assertEquals(((Number) expected.get(index).fields().get("value")).doubleValue(),
+                    ((Number) actual.get(index).get("value")).doubleValue());
+        }
+    }
+
+    @Test
+    default void capabilityFieldSortReturnsExpectedRows() {
+        if (!supportsSemanticsCapability(BackendCapability.FIELD_SORT)) {
+            assertUnsupportedSemanticsCapability(BackendCapability.FIELD_SORT);
+            return;
+        }
+        List<TSDBRecord> expected = List.of(record(semanticsTime(), "a", Map.of("value", 3d)),
+                record(semanticsTime() + 1, "b", Map.of("value", 1d)),
+                record(semanticsTime() + 2, "c", Map.of("value", 2d)));
+        assertTrue(semanticsAdapter().batchWrite(null, expected));
+        awaitSemanticsVisibility(expected);
+        for (SortOrderEnum direction : SortOrderEnum.values()) {
+            TSDBQuery query = detailQuery();
+            query.setSortSpecs(List.of(new SortSpec("value", direction)));
+            List<Map<String, Object>> rows = semanticsAdapter().query(null, query).getRows();
+            assertEquals(direction == SortOrderEnum.ASC ? List.of(1d, 2d, 3d) : List.of(3d, 2d, 1d),
+                    rows.stream().map(row -> ((Number) row.get("value")).doubleValue()).toList());
+        }
+    }
+
+    @Test
+    default void capabilityStrictCompositeCursorReturnsEveryPoint() {
+        if (!supportsSemanticsCapability(BackendCapability.STRICT_COMPOSITE_CURSOR)) {
+            assertUnsupportedSemanticsCapability(BackendCapability.STRICT_COMPOSITE_CURSOR);
+            return;
+        }
+        List<TSDBRecord> points = new ArrayList<>();
+        for (int time = 0; time < 2; time++) {
+            for (String device : List.of("a", "b", "c"))
+                points.add(record(semanticsTime() + time, device, Map.of("value", time + 1d)));
+        }
+        assertTrue(semanticsAdapter().batchWrite(null, points));
+        awaitSemanticsVisibility(points);
+        for (SortOrderEnum timeOrder : SortOrderEnum.values()) {
+            for (SortOrderEnum tagOrder : SortOrderEnum.values()) {
+                List<String> expected = new ArrayList<>();
+                for (int time : timeOrder == SortOrderEnum.ASC ? List.of(0, 1) : List.of(1, 0)) {
+                    for (String device : tagOrder == SortOrderEnum.ASC ? List.of("a", "b", "c") : List.of("c", "b", "a"))
+                        expected.add((semanticsTime() + time) + "/" + device);
+                }
+                List<String> collected = new ArrayList<>();
+                Map<String, Object> cursor = null;
+                for (int page = 0; page < points.size() + 1; page++) {
+                    TSDBQuery query = detailQuery();
+                    query.setStrictCursor(true);
+                    query.setCursorColumns(List.of("time", "device"));
+                    query.setSortSpecs(List.of(new SortSpec("time", timeOrder), new SortSpec("device", tagOrder)));
+                    query.setCursorValues(cursor);
+                    query.setLimit(2);
+                    List<Map<String, Object>> rows = semanticsAdapter().query(null, query).getRows();
+                    if (rows.isEmpty()) break;
+                    assertTrue(page < points.size(), "Composite cursor must terminate");
+                    for (Map<String, Object> row : rows) collected.add(row.get("time") + "/" + row.get("device"));
+                    Map<String, Object> last = rows.get(rows.size() - 1);
+                    cursor = Map.of("time", last.get("time"), "device", last.get("device"));
+                }
+                assertEquals(expected, collected, "The complete unique key must preserve every tied timestamp");
+            }
+        }
+    }
+
+    @Test
+    default void capabilityRegionalCalendarDayReturnsExpectedWindows() {
+        if (!supportsSemanticsCapability(BackendCapability.REGIONAL_CALENDAR_DAY)) {
+            assertUnsupportedSemanticsCapability(BackendCapability.REGIONAL_CALENDAR_DAY);
+            return;
+        }
+        java.time.ZoneId zone = java.time.ZoneId.of("America/New_York");
+        java.time.LocalDate first = java.time.LocalDate.of(2026, 3, 7);
+        List<Long> boundaries = java.util.stream.IntStream.rangeClosed(0, 3)
+                .mapToObj(day -> first.plusDays(day).atStartOfDay(zone).toInstant().toEpochMilli()).toList();
+        assertEquals(23 * 3_600_000L, boundaries.get(2) - boundaries.get(1));
+        List<TSDBRecord> points = new ArrayList<>();
+        for (int day = 0; day < 3; day++) {
+            points.add(record(boundaries.get(day), "calendar", Map.of("value", 1d)));
+            points.add(record(boundaries.get(day + 1) - 1, "calendar", Map.of("value", 1d)));
+        }
+        assertTrue(semanticsAdapter().batchWrite(null, points));
+        awaitSemanticsVisibility(points);
+        TSDBQuery query = detailQuery();
+        query.setStartTime(boundaries.get(0));
+        query.setEndTime(boundaries.get(3) - 1);
+        query.setTimeZone(zone.getId());
+        query.setGroupByTime("1d");
+        query.setAggregations(List.of(new AggregationSpec("value", AggregationFunctionEnum.SUM, "total")));
+        List<Map<String, Object>> rows = semanticsAdapter().query(null, query).getRows();
+        assertEquals(3, rows.size());
+        for (int day = 0; day < rows.size(); day++) {
+            assertEquals(boundaries.get(day), assertInstanceOf(Long.class, rows.get(day).get("window_start")));
+            assertEquals(2d, ((Number) rows.get(day).get("total")).doubleValue());
+        }
+        assertEquals(3L, semanticsAdapter().count(null, query));
+    }
+
+    @Test
+    default void capabilityTimeNotEqualReturnsExpectedRows() {
+        assertTimeFilterCapability(BackendCapability.TIME_FILTER_NE, OperatorEnum.NE);
+    }
+
+    @Test
+    default void capabilityTimeInReturnsExpectedRows() {
+        assertTimeFilterCapability(BackendCapability.TIME_FILTER_IN, OperatorEnum.IN);
+    }
+
+    private void assertTimeFilterCapability(BackendCapability capability, OperatorEnum operator) {
+        boolean supported = supportsSemanticsCapability(capability);
+        long base = semanticsTime();
+        List<TSDBRecord> points = new ArrayList<>();
+        for (int index = 0; index < 4; index++) points.add(record(base + index, "time-capability", Map.of("value", index + 1d)));
+        assertTrue(semanticsAdapter().batchWrite(null, points));
+        awaitSemanticsVisibility(points);
+        List<Long> operands = operator == OperatorEnum.NE ? List.of(base + 1) : List.of(base, base + 2);
+        for (boolean instant : List.of(false, true)) {
+            List<Object> values = operands.stream().map(value -> instant
+                    ? (Object) java.time.Instant.ofEpochMilli(value) : (Object) value).toList();
+            TSDBQuery query = detailQuery();
+            query.setStartTime(base + 1);
+            query.setEndTime(base + 2);
+            query.setFilters(List.of(new QueryFilter("time", operator, values)));
+            if (supported) {
+                List<Map<String, Object>> rows = semanticsAdapter().query(null, query).getRows();
+                assertEquals(List.of(base + 2), rows.stream().map(row -> assertInstanceOf(Long.class, row.get("time"))).toList());
+                assertEquals(1L, semanticsAdapter().count(null, query));
+            } else {
+                assertEquals(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION,
+                        assertThrows(TSDBException.class, () -> semanticsAdapter().query(null, query)).getErrorCode());
+                assertEquals(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION,
+                        assertThrows(TSDBException.class, () -> semanticsAdapter().count(null, query)).getErrorCode());
+            }
+            assertEquals(values, query.getFilters().get(0).values());
+        }
+        assertEquals(4L, semanticsAdapter().count(null, detailQuery()));
+    }
+
+    @Test
+    default void everyPrimaryTimeFilterUsesEpochMillisecondsAndIntersectsTheTimeRange() {
+        long base = semanticsTime();
+        List<TSDBRecord> points = new ArrayList<>();
+        for (int index = 0; index < 4; index++) points.add(record(base + index, "time-filter", Map.of("value", index + 1d)));
+        assertTrue(semanticsAdapter().batchWrite(null, points));
+        awaitSemanticsVisibility(points);
+        for (OperatorEnum operator : OperatorEnum.values()) {
+            List<Long> operands = switch (operator) {
+                case IN -> List.of(base, base + 2);
+                case BETWEEN -> List.of(base, base + 2);
+                case LT -> List.of(base + 2);
+                default -> List.of(base + 1);
+            };
+            List<Long> expected = switch (operator) {
+                case EQ, LE -> List.of(base + 1);
+                case NE, GT, IN -> List.of(base + 2);
+                case GE, BETWEEN -> List.of(base + 1, base + 2);
+                case LT -> List.of(base + 1);
+            };
+            for (boolean instant : List.of(false, true)) {
+                List<Object> values = operands.stream().map(value -> instant
+                        ? (Object) java.time.Instant.ofEpochMilli(value) : (Object) value).toList();
+                TSDBQuery query = detailQuery();
+                query.setStartTime(base + 1);
+                query.setEndTime(base + 2);
+                query.setFilters(List.of(new QueryFilter("time", operator, values)));
+                BackendCapability capability = switch (operator) {
+                    case NE -> BackendCapability.TIME_FILTER_NE;
+                    case IN -> BackendCapability.TIME_FILTER_IN;
+                    default -> null;
+                };
+                if (capability != null && !BackendContractRegistry.profile(semanticsBackendId()).supports(capability)) {
+                    assertEquals(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION,
+                            assertThrows(TSDBException.class, () -> semanticsAdapter().query(null, query)).getErrorCode());
+                    assertEquals(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION,
+                            assertThrows(TSDBException.class, () -> semanticsAdapter().count(null, query)).getErrorCode());
+                    assertEquals(values, query.getFilters().get(0).values());
+                    continue;
+                }
+                List<Map<String, Object>> rows = semanticsAdapter().query(null, query).getRows();
+                assertEquals(expected, rows.stream().map(row -> assertInstanceOf(Long.class, row.get("time"))).toList(),
+                        operator + " with " + (instant ? "Instant" : "Long"));
+                assertEquals(expected.size(), semanticsAdapter().count(null, query), operator.toString());
+                assertEquals(values, query.getFilters().get(0).values());
+            }
+        }
+    }
+
+    @Test
+    default void numericAndBooleanTagFiltersMatchTheWrittenStringTags() {
+        List<TSDBRecord> points = List.of(record(semanticsTime(), "42", Map.of("value", 1d)),
+                record(semanticsTime() + 1, "true", Map.of("value", 2d)),
+                record(semanticsTime() + 2, "false", Map.of("value", 3d)),
+                record(semanticsTime() + 3, "other", Map.of("value", 4d)));
+        assertTrue(semanticsAdapter().batchWrite(null, points));
+        awaitSemanticsVisibility(points);
+        for (Object value : List.of(42L, true, false)) {
+            TGQueryBuilder<?> builder = semanticsQuery().whereTag("device", value).orderByTimeAsc();
+            List<Map> rows = builder.list(Map.class);
+            assertEquals(1, rows.size());
+            assertEquals(String.valueOf(value), rows.get(0).get("device"));
+            assertEquals(1L, semanticsAdapter().count(null, builder.build()));
+        }
+        TGQueryBuilder<?> in = semanticsQuery().whereTagIn("device", java.util.Arrays.asList(42, true, null, false)).orderByTimeAsc();
+        assertEquals(List.of("42", "true", "false"), in.list(Map.class).stream().map(row -> row.get("device")).toList());
+        assertEquals(3L, semanticsAdapter().count(null, in.build()));
+    }
+
+    private boolean supportsSemanticsCapability(BackendCapability capability) {
+        prepareSemanticsCapability(capability);
+        assertNotNull(semanticsProtocol());
+        assertFalse(semanticsProtocol().isBlank());
+        assertTrue(semanticsServerVersion().matches("[0-9]+\\.[0-9]+\\.[0-9]+"),
+                "The fixture must identify the exact server version");
+        BackendContractRegistry.Status status = BackendContractRegistry.profile(semanticsBackendId()).capabilities().get(capability);
+        assertNotNull(status);
+        for (BackendContractRegistry.Condition condition : BackendContractRegistry.conditions(semanticsBackendId(), capability)) {
+            if (condition.serverVersions().contains(semanticsServerVersion())) {
+                assertEquals(condition.requiredValue(), semanticsConfiguration().get(condition.property()),
+                        "The real fixture must apply its version-specific prerequisite for " + semanticsProtocol());
+            }
+        }
+        System.out.println("CAPABILITY backend=" + semanticsBackendId() + " capability=" + capability
+                + " status=" + status + " server=" + semanticsServerVersion() + " protocol=" + semanticsProtocol()
+                + " settings=" + semanticsConfiguration());
+        return status != BackendContractRegistry.Status.UNSUPPORTED;
+    }
+
+    private void assertUnsupportedSemanticsCapability(BackendCapability capability) {
+        TSDBRecord existing = record(semanticsTime(), "unsupported", Map.of("value", 1d));
+        assertTrue(semanticsAdapter().write(null, existing));
+        awaitSemanticsVisibility(List.of(existing));
+        TSDBQuery query = capability.query();
+        query.setMeasurement(semanticsMeasurement());
+        assertEquals(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION,
+                assertThrows(TSDBException.class, () -> semanticsAdapter().query(null, query)).getErrorCode());
+        assertEquals(1L, semanticsAdapter().count(null, detailQuery()));
+    }
 
     @Test
     default void countBeyondQueryRowLimitCountsDetailsAndGroupsBeforePagination() {
@@ -191,6 +464,7 @@ public interface BackendSemanticsContract {
     private TSDBQuery detailQuery() {
         TSDBQuery query = new TSDBQuery();
         query.setMeasurement(semanticsMeasurement());
+        query.setOrder(SortOrderEnum.ASC);
         return query;
     }
 }

@@ -37,7 +37,7 @@ public class DefaultTSDBMetadataResolver implements TSDBMetadataResolver {
     private static final Object UNMAPPED = new Object();
 
     /**
-     * Preserves explicit nulls in the loose index so computeIfAbsent cannot replace them as missing values.
+     * Preserves explicit nulls in result-row indexes so they cannot be replaced as missing values.
      */
     private static final Object NULL_VALUE = new Object();
 
@@ -183,6 +183,9 @@ public class DefaultTSDBMetadataResolver implements TSDBMetadataResolver {
     private record ResultColumnCandidate(String exactName, String lowerName, String normalizedName) {
     }
 
+    private record ResultRowIndex(Map<String, Object> lowercase, Map<String, Object> normalized) {
+    }
+
     /**
      * Resolves the TSDB annotation metadata for an entity class.
      *
@@ -250,6 +253,21 @@ public class DefaultTSDBMetadataResolver implements TSDBMetadataResolver {
     }
 
     /**
+     * Prepares the cached reflection mapping plan without constructing a result object.
+     * <p>Subclasses with different {@link #toEntity(Class, Map)} mapping requirements should also
+     * override this method to validate their own result types.</p>
+     *
+     * @param resultType non-null result class
+     */
+    @Override
+    public void validateResultType(Class<?> resultType) {
+        if (resultType == null) {
+            throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "resultType must not be null");
+        }
+        readPlans.get(resultType);
+    }
+
+    /**
      * <h4>Maps a query result row to the requested Java object</h4>
      *
      * <p>Converts one map returned by a time-series query into a Java object using reflection.</p>
@@ -284,7 +302,7 @@ public class DefaultTSDBMetadataResolver implements TSDBMetadataResolver {
         }
         ResultMappingPlan plan = readPlans.get(entityType);
         T entity = entityType.cast(instantiate(plan.constructor()));
-        Map<String, Object> indexedRow = indexRow(row);
+        ResultRowIndex indexedRow = indexRow(row);
         for (ResultFieldPlan field : plan.fields()) {
             Object value = findFieldValue(row, indexedRow, field);
             if (value != UNMAPPED && (value != null || !field.primitive())) {
@@ -337,39 +355,41 @@ public class DefaultTSDBMetadataResolver implements TSDBMetadataResolver {
     }
 
     /**
-     * Builds a loose result-row index for exact names and snake_case to camelCase matching.
+     * Builds independent case-insensitive and normalized indexes for loose DTO matching.
+     * <p>Separate indexes prevent a normalized name from shadowing a closer case-insensitive match.
+     * Each index retains the first matching column, including explicit nulls.</p>
      *
      * @param row one adapter result row, for example {@code Map.of("tag_name", "device001")}
-     * @return row values indexed by original, lowercase, and normalized column names
+     * @return row values indexed separately by lowercase and normalized column names
      * @author Alan Zhang [initiator@alandevise.com]
      * @since 2026-07-02
      */
-    private static Map<String, Object> indexRow(Map<String, Object> row) {
-        Map<String, Object> indexed = new LinkedHashMap<>();
+    private static ResultRowIndex indexRow(Map<String, Object> row) {
+        Map<String, Object> lowercase = new LinkedHashMap<>();
+        Map<String, Object> normalized = new LinkedHashMap<>();
         for (Map.Entry<String, Object> entry : row.entrySet()) {
             if (entry.getKey() == null) {
                 continue;
             }
-            for (String key : List.of(entry.getKey(), entry.getKey().toLowerCase(Locale.ROOT),
-                    normalizeResultName(entry.getKey()))) {
-                indexed.computeIfAbsent(key, ignored -> entry.getValue() == null ? NULL_VALUE : entry.getValue());
-            }
+            Object value = entry.getValue() == null ? NULL_VALUE : entry.getValue();
+            lowercase.putIfAbsent(entry.getKey().toLowerCase(Locale.ROOT), value);
+            normalized.putIfAbsent(normalizeResultName(entry.getKey()), value);
         }
-        return indexed;
+        return new ResultRowIndex(lowercase, normalized);
     }
 
     /**
      * Matches annotated fields by physical column only; unannotated fields also use Java names and common aliases.
      *
      * @param row        original adapter result row, for example {@code Map.of("tag_name", "device001")}
-     * @param indexedRow loose row index, for example containing {@code tagname -> device001}
+     * @param indexedRow separate case-insensitive and normalized row indexes
      * @param field      cached field mapping, for example the plan for {@code ValueResult.tagName}
      * @return the matched value, possibly null, or UNMAPPED when no column matches
      * @author Alan Zhang [initiator@alandevise.com]
      * @since 2026-07-02
      */
     private static Object findFieldValue(Map<String, Object> row,
-                                         Map<String, Object> indexedRow,
+                                         ResultRowIndex indexedRow,
                                          ResultFieldPlan field) {
         // Annotated fields use only physical columns; preserve exact-match and first case-variant precedence.
         if (field.physicalOnly()) {
@@ -441,24 +461,24 @@ public class DefaultTSDBMetadataResolver implements TSDBMetadataResolver {
      * <p>Looks up original names, case-insensitive names, and normalized names in that order.</p>
      *
      * @param row        original adapter result row, for example {@code Map.of("tag_name", "device001")}
-     * @param indexedRow loose row index, for example containing {@code tagname -> device001}
+     * @param indexedRow separate case-insensitive and normalized row indexes
      * @param candidate  cached candidate names, for example the names for {@code "tagName"}
      * @return the matched value, possibly null, or UNMAPPED when no column matches
      * @author Alan Zhang [initiator@alandevise.com]
      * @since 2026-07-02
      */
     private static Object findCandidateValue(Map<String, Object> row,
-                                             Map<String, Object> indexedRow,
+                                             ResultRowIndex indexedRow,
                                              ResultColumnCandidate candidate) {
         // Match the exact name first, including explicit nulls.
         if (row.containsKey(candidate.exactName())) {
             return row.get(candidate.exactName());
         }
         // Candidate normalization is independent of each row and was prepared with Locale.ROOT.
-        Object value = indexedRow.get(candidate.lowerName());
+        Object value = indexedRow.lowercase().get(candidate.lowerName());
         if (value == null) {
             // Ignore differences in naming convention.
-            value = indexedRow.getOrDefault(candidate.normalizedName(), UNMAPPED);
+            value = indexedRow.normalized().getOrDefault(candidate.normalizedName(), UNMAPPED);
         }
         // Restore the null sentinel to an actual null; missing columns remain UNMAPPED.
         return value == NULL_VALUE ? null : value;
@@ -675,6 +695,10 @@ public class DefaultTSDBMetadataResolver implements TSDBMetadataResolver {
      * @return accessible no-argument constructor
      */
     private static Constructor<?> resultConstructor(Class<?> entityType) {
+        if (entityType.isInterface() || Modifier.isAbstract(entityType.getModifiers())) {
+            throw new TSDBException(TSDBErrorCodeEnum.METADATA_ERROR,
+                    entityType.getName() + " must be a concrete result class");
+        }
         try {
             Constructor<?> constructor = entityType.getDeclaredConstructor();
             constructor.setAccessible(true);

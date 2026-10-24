@@ -14,10 +14,12 @@ import com.alandevise.tsgate.model.QueryFilter;
 import com.alandevise.tsgate.model.QueryResult;
 import com.alandevise.tsgate.model.TSDBQuery;
 import com.alandevise.tsgate.model.TSDBRecord;
+import com.alandevise.tsgate.util.QueryLiteralSupport;
 import org.influxdb.InfluxDB;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -221,11 +223,13 @@ public class OpenGeminiAdapter implements TSDBAdapter {
 
     /**
      * Executes the common query model with time-only ordering and bounded results.
-     * Strict composite cursors and field ordering are unsupported for this default-engine subset.
+     * Strict composite cursors, field ordering, and primary-time NE/IN filters are unsupported for this default-engine subset.
      * Time-window aggregations require explicit bounds and UTC or a fixed-offset calendar alignment.
-     * The exact missing-measurement backend error returns no rows. Integer-valued Number predicates
+     * The exact missing-measurement backend error returns no rows. Integer-valued Number field predicates
      * must fit signed int64 and be exactly representable as float64; Float/Double retain floating-point semantics.
      * Exponent-form integer literals are range-checked before expanding them into an integer.
+     * Numeric operands are frozen in a local query copy before validation and SQL translation.
+     * Primary-time filters accept only Number or Instant values under the delegate's epoch-millisecond contract.
      *
      * @param database target database; null or blank selects the configured default
      * @param query common query model
@@ -236,8 +240,9 @@ public class OpenGeminiAdapter implements TSDBAdapter {
         return withReadLock(() -> {
             try {
                 delegate.getNativeClient();
-                validateIntegerFilters(query);
-                return delegate.query(database, query);
+                TSDBQuery snapshot = freezeNumericFilters(query);
+                validateIntegerFilters(snapshot);
+                return delegate.query(database, snapshot);
             } catch (TSDBException error) {
                 if (isMissingMeasurement(error)) return emptyResult();
                 throw error;
@@ -249,7 +254,8 @@ public class OpenGeminiAdapter implements TSDBAdapter {
      * Counts logical result rows using a bounded streaming scan, including sparse-field rows.
      * Pagination and cursors are ignored in a private query copy. The response-byte limit applies;
      * the result-row cap does not apply to count scans. The exact missing-measurement error returns zero.
-     * Integer-valued Number filters follow the same precision validation as common queries.
+     * Integer-valued Number field filters follow the same precision validation as common queries.
+     * Primary-time filters retain the common epoch-millisecond contract.
      *
      * @param database target database; null or blank selects the configured default
      * @param query common query model
@@ -260,8 +266,9 @@ public class OpenGeminiAdapter implements TSDBAdapter {
         return withReadLock(() -> {
             try {
                 delegate.getNativeClient();
-                validateIntegerFilters(query);
-                return delegate.count(database, query);
+                TSDBQuery snapshot = freezeNumericFilters(query);
+                validateIntegerFilters(snapshot);
+                return delegate.count(database, snapshot);
             } catch (TSDBException error) {
                 if (isMissingMeasurement(error)) return 0L;
                 throw error;
@@ -298,10 +305,35 @@ public class OpenGeminiAdapter implements TSDBAdapter {
             validateExactInteger(BigInteger.valueOf(((Number) value).longValue()));
     }
 
+    /** Freezes numeric operands before precision validation without changing caller-owned query values. */
+    private static TSDBQuery freezeNumericFilters(TSDBQuery query) {
+        if (query == null) return null;
+        TSDBQuery snapshot = query.copy();
+        List<QueryFilter> filters = new ArrayList<>();
+        for (QueryFilter filter : query.getFilters()) {
+            if (filter == null) {
+                filters.add(null);
+                continue;
+            }
+            List<Object> values = new ArrayList<>();
+            for (Object value : filter.values()) {
+                if (value instanceof Number number && !(value instanceof Float) && !(value instanceof Double)) {
+                    values.add(QueryLiteralSupport.decimalValue(number));
+                } else {
+                    values.add(value);
+                }
+            }
+            filters.add(new QueryFilter(filter.column(), filter.operator(), values));
+        }
+        snapshot.setFilters(filters);
+        return snapshot;
+    }
+
     private static void validateIntegerFilters(TSDBQuery query) {
         if (query == null || query.getFilters() == null) return;
         for (QueryFilter filter : query.getFilters()) {
             if (filter == null) continue; // Leave ordinary model validation to the delegate.
+            if ("time".equals(filter.column())) continue; // Timestamp literals do not pass through float64.
             for (Object value : filter.values()) {
                 if (!(value instanceof Number number) || value instanceof Float || value instanceof Double) continue;
                 BigDecimal decimal;

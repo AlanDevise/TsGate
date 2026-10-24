@@ -28,6 +28,16 @@ BACKEND_TESTS = {
 }
 
 
+DOCKER_REPORTS = runpy.run_path(str(Path(__file__).with_name("docker-reports.py")))
+
+
+def docker_report_plan(registration, backend=None, include_opengemini=False):
+    plans = [plan for identity, plan in registration["dockerReports"].items()
+             if (plan["kind"] == "representative" and backend in (None, plan["selector"]))
+             or (identity == "opengemini" and include_opengemini)]
+    return DOCKER_REPORTS["combine_plans"](plans)
+
+
 def git_commit():
     return capture(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip()
 
@@ -258,6 +268,8 @@ def main(argv=None):
             command += external_parameters
             capture(["docker", "info", "--format", "{{.ServerVersion}}"])
             summary["servers"] = backend_selection(json.loads(SERVERS.read_text()), args.backend)
+            summary["dockerReportPlan"] = docker_report_plan(summary["backendRegistration"], args.backend,
+                                                            external_metadata["status"] == "included")
             command += backend_parameters(args.backend)
             for server in summary["servers"]:
                 start_server(server, created, args.pull, suffix)
@@ -265,6 +277,7 @@ def main(argv=None):
                 wait_ready(server)
                 key = "endpoint" if server["kind"] == "iotdb" else "url"
                 command += ["-Dtsdb.it." + server["kind"] + "." + key + "=" + server[key]]
+                command += ["-Dtsdb.it." + server["kind"] + ".version=" + server["version"]]
             profiles.append("docker-it")
             command += ["-Dtsdb.it.iotdb.rpc-compression-enabled=true",
                         "-Dtsdb.it.iotdb.legacy-compression-rejection=false",
@@ -276,11 +289,16 @@ def main(argv=None):
         if source_manifest() != summary["sourceManifest"] or git_commit() != summary["gitCommit"]:
             raise RuntimeError("Build inputs or Git commit changed before Maven")
         summary["command"] = command
+        started_ns = time.time_ns()
+        summary["mavenStartedAtNs"] = started_ns
         summary["mavenExit"] = logged(command, output / "maven.log")
         for report_type in (["surefire", "failsafe"] if args.mode == "docker" else ["surefire"]):
-            result = reports(output, report_type)
+            result = (DOCKER_REPORTS["collect_reports"](ROOT, output, started_ns, summary["dockerReportPlan"])
+                      if report_type == "failsafe" else reports(output, report_type))
             summary[report_type] = result
             print(report_type.upper() + ":", result["totals"], flush=True)
+            if report_type == "failsafe":
+                DOCKER_REPORTS["validate_reports"](result, summary["dockerReportPlan"])
             if result["totals"]["tests"] == 0 or any(result["totals"][key] for key in ("failures", "errors", "skipped")):
                 raise RuntimeError("Missing, failing or skipped tests: " + report_type)
         if summary["mavenExit"] != 0:

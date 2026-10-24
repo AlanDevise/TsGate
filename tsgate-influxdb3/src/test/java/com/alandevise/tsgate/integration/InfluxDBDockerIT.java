@@ -15,6 +15,30 @@ import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 class InfluxDBDockerIT extends DatabaseContractIT implements com.alandevise.tsgate.contract.BackendSemanticsContract {
+    @Override public String semanticsBackendId() { return "influxdb3"; }
+    @Override public String semanticsServerVersion() { return System.getProperty("tsdb.it.influxdb.version", "3.11.5"); }
+    @Override public String semanticsProtocol() { return "influxdb3-http-sql"; }
+    private StrictCursorSqlStrategyEnum semanticsCursorStrategy;
+    @Override public Map<String, String> semanticsConfiguration() {
+        StrictCursorSqlStrategyEnum strategy = semanticsCursorStrategy != null ? semanticsCursorStrategy
+                : StrictCursorSqlStrategyEnum.valueOf(System.getProperty("tsdb.it.influxdb.strict-cursor-sql", "OR")
+                        .replace('-', '_').toUpperCase(Locale.ROOT));
+        return Map.of("tsdb.influxdb.strict-cursor-sql", strategy.name().toLowerCase(Locale.ROOT).replace('_', '-'));
+    }
+    @Override public void prepareSemanticsCapability(com.alandevise.tsgate.contract.BackendCapability capability) {
+        if (capability == com.alandevise.tsgate.contract.BackendCapability.STRICT_COMPOSITE_CURSOR
+                && List.of("3.0.0", "3.0.3").contains(semanticsServerVersion())) {
+            adapter.close();
+            InfluxDBProperties properties = new InfluxDBProperties();
+            properties.setUrl(URL);
+            properties.setDatabase(db);
+            properties.setStrictCursorSql(StrictCursorSqlStrategyEnum.UNION_ALL);
+            semanticsCursorStrategy = StrictCursorSqlStrategyEnum.UNION_ALL;
+            adapter = new InfluxDBAdapter(properties, false);
+            adapter.init();
+            template = new TGTemplate(adapter);
+        }
+    }
     @Override public com.alandevise.tsgate.adapter.TSDBAdapter semanticsAdapter() { return adapter; }
     @Override public com.alandevise.tsgate.core.TGQueryBuilder<?> semanticsQuery() { return template.query(Telemetry.class); }
     @Override public String semanticsMeasurement() { return "telemetry"; }

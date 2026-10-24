@@ -14,6 +14,27 @@ import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 class IoTDBDockerIT extends DatabaseContractIT implements com.alandevise.tsgate.contract.BackendSemanticsContract {
+    @Override public String semanticsBackendId() { return "iotdb"; }
+    @Override public String semanticsServerVersion() { return System.getProperty("tsdb.it.iotdb.version", "2.0.10"); }
+    @Override public String semanticsProtocol() { return "iotdb-table-rpc"; }
+    private Boolean semanticsCompression;
+    @Override public Map<String, String> semanticsConfiguration() {
+        boolean compression = semanticsCompression != null ? semanticsCompression
+                : Boolean.parseBoolean(System.getProperty("tsdb.it.iotdb.rpc-compression-enabled", "true"));
+        return Map.of("tsdb.iotdb.table.rpc-compression-enabled", String.valueOf(compression));
+    }
+    @Override public void prepareSemanticsCapability(com.alandevise.tsgate.contract.BackendCapability capability) {
+        if (capability == com.alandevise.tsgate.contract.BackendCapability.BATCH_WRITE
+                && semanticsServerVersion().equals("2.0.2")) {
+            adapter.close();
+            IoTDBProperties properties = config(db);
+            properties.getTable().setRpcCompressionEnabled(false);
+            semanticsCompression = false;
+            adapter = new IoTDBTableAdapter(properties, properties.getPool(), false);
+            adapter.init();
+            template = new TGTemplate(adapter);
+        }
+    }
     @Override public com.alandevise.tsgate.adapter.TSDBAdapter semanticsAdapter() { return adapter; }
     @Override public com.alandevise.tsgate.core.TGQueryBuilder<?> semanticsQuery() { return template.query(Telemetry.class); }
     @Override public String semanticsMeasurement() { return "telemetry"; }

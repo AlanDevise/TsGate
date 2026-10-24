@@ -3,6 +3,7 @@ package com.alandevise.tsgate.adapter.impl;
 import com.alandevise.tsgate.util.TimeWindowDuration;
 import com.alandevise.tsgate.util.TimeWindowPlan;
 import com.alandevise.tsgate.util.TSDBQueryValidator;
+import com.alandevise.tsgate.util.QueryLiteralSupport;
 
 import com.alandevise.tsgate.adapter.TSDBAdapter;
 import com.alandevise.tsgate.config.IoTDBNodeDiscoveryModeEnum;
@@ -1313,7 +1314,7 @@ public class IoTDBTableAdapter implements TSDBAdapter {
                     + " " + query.getCursorTime());
         }
         for (QueryFilter filter : query.getFilters()) {
-            filters.add(buildFilterSql(filter));
+            filters.add(buildFilterSql(filter, query.getTimeColumn()));
         }
         return filters;
     }
@@ -1678,11 +1679,12 @@ public class IoTDBTableAdapter implements TSDBAdapter {
     /**
      * Translate a shared filter into an IoTDB WHERE predicate.
      * @param filter shared query filter; for example {@code new QueryFilter("device_code", OperatorEnum.EQ, List.of("D001"))}
+     * @param timeColumn physical time column whose numeric operands use whole epoch milliseconds
      * @return IoTDB WHERE predicate, for example {@code "device_code = 'D001'"}
      * @author Alan Zhang [initiator@alandevise.com]
      * @since 2026-07-02
      */
-    private String buildFilterSql(QueryFilter filter) {
+    private String buildFilterSql(QueryFilter filter, String timeColumn) {
         if (filter == null
                 || isBlank(filter.column())
                 || filter.operator() == null) {
@@ -1694,43 +1696,26 @@ public class IoTDBTableAdapter implements TSDBAdapter {
                     "Filter values must not be empty: " + filter.column());
         }
         String column = normalizeIdentifier(filter.column());
+        boolean timeFilter = canonicalColumn(column).equals(canonicalColumn(normalizeIdentifier(timeColumn)));
+        List<String> literals = values.stream().map(value -> timeFilter
+                ? Long.toString(QueryLiteralSupport.exactEpochMillis(value)) : formatSqlValue(value)).toList();
         OperatorEnum operator = filter.operator();
         return switch (operator) {
-            case EQ -> column + " = " + formatSqlValue(values.get(0));
-            case NE -> column + " <> " + formatSqlValue(values.get(0));
-            case GT -> column + " > " + formatSqlValue(values.get(0));
-            case GE -> column + " >= " + formatSqlValue(values.get(0));
-            case LT -> column + " < " + formatSqlValue(values.get(0));
-            case LE -> column + " <= " + formatSqlValue(values.get(0));
-            case IN -> column + " IN (" + joinSqlValues(values) + ")";
+            case EQ -> column + " = " + literals.get(0);
+            case NE -> column + " <> " + literals.get(0);
+            case GT -> column + " > " + literals.get(0);
+            case GE -> column + " >= " + literals.get(0);
+            case LT -> column + " < " + literals.get(0);
+            case LE -> column + " <= " + literals.get(0);
+            case IN -> column + " IN (" + String.join(", ", literals) + ")";
             case BETWEEN -> {
                 if (values.size() < 2) {
                     throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR,
                             "BETWEEN filter requires two values: " + column);
                 }
-                yield column + " BETWEEN " + formatSqlValue(values.get(0)) + " AND " + formatSqlValue(values.get(1));
+                yield column + " BETWEEN " + literals.get(0) + " AND " + literals.get(1);
             }
         };
-    }
-
-    /**
-     * Join SQL literals for an IN predicate.
-     * @param values values to format; for example {@code List.of("beijing", "shanghai")}
-     * @return SQL literal list, for example {@code "'beijing', 'shanghai'"}
-     * @author Alan Zhang [initiator@alandevise.com]
-     * @since 2026-07-02
-     */
-    private String joinSqlValues(List<Object> values) {
-        List<String> sqlValues = new ArrayList<>();
-        for (Object value : values) {
-            if (value != null) {
-                sqlValues.add(formatSqlValue(value));
-            }
-        }
-        if (sqlValues.isEmpty()) {
-            throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "IN filter values must not be empty");
-        }
-        return String.join(", ", sqlValues);
     }
 
     /**
@@ -1741,8 +1726,10 @@ public class IoTDBTableAdapter implements TSDBAdapter {
      * @since 2026-07-02
      */
     private String formatSqlValue(Object value) {
-        if (value instanceof Number
-                || value instanceof Boolean) {
+        if (value instanceof Number number) {
+            return QueryLiteralSupport.numericLiteral(number);
+        }
+        if (value instanceof Boolean) {
             return value.toString();
         }
         if (value instanceof Instant) {
