@@ -2,8 +2,12 @@ package com.alandevise.tsgate.contract;
 
 import com.alandevise.tsgate.adapter.TSDBAdapter;
 import com.alandevise.tsgate.core.TGQueryBuilder;
+import com.alandevise.tsgate.core.TGTemplate;
 import com.alandevise.tsgate.exception.TSDBErrorCodeEnum;
 import com.alandevise.tsgate.exception.TSDBException;
+import com.alandevise.tsgate.metadata.DefaultTSDBMetadataResolver;
+import com.alandevise.tsgate.metadata.TSDBColumnMetadata;
+import com.alandevise.tsgate.metadata.TSDBEntityMetadata;
 import com.alandevise.tsgate.model.AggregationFunctionEnum;
 import com.alandevise.tsgate.model.AggregationSpec;
 import com.alandevise.tsgate.model.BatchWriteResult;
@@ -12,10 +16,12 @@ import com.alandevise.tsgate.model.SortSpec;
 import com.alandevise.tsgate.model.PageResult;
 import com.alandevise.tsgate.model.OperatorEnum;
 import com.alandevise.tsgate.model.QueryFilter;
+import com.alandevise.tsgate.model.QueryResult;
 import com.alandevise.tsgate.model.TSDBQuery;
 import com.alandevise.tsgate.model.TSDBRecord;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Constructor;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -289,6 +295,90 @@ public interface BackendSemanticsContract {
         TGQueryBuilder<?> in = semanticsQuery().whereTagIn("device", java.util.Arrays.asList(42, true, null, false)).orderByTimeAsc();
         assertEquals(List.of("42", "true", "false"), in.list(Map.class).stream().map(row -> row.get("device")).toList());
         assertEquals(3L, semanticsAdapter().count(null, in.build()));
+    }
+
+    @Test
+    default void nonEmptyWhitespaceTagsKeepTheirValuesAndSameTimePointIdentityThroughPojoWrites() throws Exception {
+        long time = semanticsTime();
+        // These fixed values are distinct identities; empty strings and null tags retain their existing semantics.
+        List<String> devices = List.of(" ", "  ", " a ", "\u2003", "\u00a0");
+        DefaultTSDBMetadataResolver resolver = new DefaultTSDBMetadataResolver();
+        TSDBEntityMetadata metadata = resolver.resolve(semanticsQuery().build().getRecordType());
+        assertEquals(semanticsMeasurement(), metadata.measurement());
+        TSDBColumnMetadata deviceColumn = metadata.tagColumns().stream()
+                .filter(column -> column.getColumnName().equals("device")).findFirst().orElseThrow();
+        TSDBColumnMetadata valueColumn = metadata.fieldColumns().stream()
+                .filter(column -> column.getColumnName().equals("value")).findFirst().orElseThrow();
+        Constructor<?> constructor = metadata.entityType().getDeclaredConstructor();
+        constructor.setAccessible(true);
+        List<Object> pojos = new ArrayList<>();
+        List<TSDBRecord> expectedPoints = new ArrayList<>();
+        Map<String, Double> expectedValues = new LinkedHashMap<>();
+        for (int index = 0; index < devices.size(); index++) {
+            String device = devices.get(index);
+            double value = index + 1d;
+            Object pojo = constructor.newInstance();
+            metadata.timeColumn().write(pojo, time);
+            deviceColumn.write(pojo, device);
+            valueColumn.write(pojo, value);
+            pojos.add(pojo);
+            expectedPoints.add(record(time, device, Map.of("value", value)));
+            expectedValues.put(device, value);
+        }
+        BatchWriteResult written = new TGTemplate(semanticsAdapter()).batchWriteDetailed(pojos);
+        assertTrue(written.isSuccess());
+        assertEquals(devices.size(), written.requestedRecords());
+        assertEquals(devices.size(), written.validatedRecords());
+        assertEquals(devices.size(), written.committedRecords());
+        awaitSemanticsVisibility(expectedPoints);
+
+        TSDBQuery all = detailQuery();
+        all.setStartTime(time);
+        all.setEndTime(time);
+        QueryResult result = semanticsAdapter().query(null, all);
+        assertTrue(result.isSuccess());
+        assertEquals(devices.size(), result.getRowCount());
+        assertWhitespaceTagRows(result.getRows(), time, expectedValues);
+        assertEquals(devices.size(), semanticsAdapter().count(null, all));
+
+        Map<String, Double> typedValues = new LinkedHashMap<>();
+        List<?> restored = semanticsQuery().timeRange(time, time).list();
+        assertEquals(devices.size(), restored.size());
+        for (Object pojo : restored) {
+            TSDBRecord point = resolver.toRecord(pojo);
+            assertEquals(time, point.timestamp());
+            String device = point.tags().get("device");
+            double value = assertInstanceOf(Number.class, point.fields().get("value")).doubleValue();
+            assertNull(typedValues.put(device, value), "Typed results must preserve each distinct tag identity");
+        }
+        assertEquals(expectedValues, typedValues);
+
+        for (String device : devices) {
+            TGQueryBuilder<?> equality = semanticsQuery().timeRange(time, time).whereTag("device", device);
+            assertWhitespaceTagRows(equality.list(Map.class), time, Map.of(device, expectedValues.get(device)));
+            assertEquals(1L, semanticsAdapter().count(null, equality.build()));
+        }
+        for (List<String> selected : List.of(devices, devices.subList(0, 2), devices.subList(2, devices.size()))) {
+            Map<String, Double> expectedSelection = new LinkedHashMap<>();
+            for (String device : selected) expectedSelection.put(device, expectedValues.get(device));
+            TGQueryBuilder<?> membership = semanticsQuery().timeRange(time, time).whereTagIn("device", selected);
+            assertWhitespaceTagRows(membership.list(Map.class), time, expectedSelection);
+            assertEquals(selected.size(), semanticsAdapter().count(null, membership.build()));
+        }
+        assertEquals(devices.size(), semanticsAdapter().count(null, detailQuery()));
+    }
+
+    private static void assertWhitespaceTagRows(List<?> rows, long time, Map<String, Double> expectedValues) {
+        assertEquals(expectedValues.size(), rows.size());
+        Map<String, Double> actualValues = new LinkedHashMap<>();
+        for (Object raw : rows) {
+            Map<?, ?> row = assertInstanceOf(Map.class, raw);
+            assertEquals(time, assertInstanceOf(Long.class, row.get("time")));
+            String device = assertInstanceOf(String.class, row.get("device"));
+            double value = assertInstanceOf(Number.class, row.get("value")).doubleValue();
+            assertNull(actualValues.put(device, value), "Distinct tag values at one timestamp must not collapse");
+        }
+        assertEquals(expectedValues, actualValues);
     }
 
     @Test

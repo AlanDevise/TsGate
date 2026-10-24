@@ -1065,7 +1065,7 @@ public class InfluxDB1Adapter implements TSDBAdapter {
     }
 
     private static void appendTag(StringBuilder line, String key, String value) {
-        if (isBlank(key) || isBlank(value)) {
+        if (isBlank(key) || value == null || value.isEmpty()) {
             return;
         }
         line.append(',')

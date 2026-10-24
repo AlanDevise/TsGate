@@ -1684,7 +1684,8 @@ public class InfluxDBAdapter implements TSDBAdapter {
     }
 
     /**
-     * Appends a line protocol tag, skipping blank keys or values.
+     * Appends a line protocol tag, preserving nonempty values and escaping spaces.
+     * Blank keys and null or empty values are omitted.
      *
      * @param line  line protocol being assembled, for example {@code new StringBuilder("ACCRUE")}
      * @param key   tag key, for example {@code "device_code"}
@@ -1693,7 +1694,7 @@ public class InfluxDBAdapter implements TSDBAdapter {
      * @since 2026-07-02
      */
     private static void appendTag(StringBuilder line, String key, String value) {
-        if (isBlank(key) || isBlank(value)) {
+        if (isBlank(key) || value == null || value.isEmpty()) {
             return;
         }
         line.append(',')

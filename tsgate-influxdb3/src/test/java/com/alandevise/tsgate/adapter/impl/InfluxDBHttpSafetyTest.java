@@ -123,6 +123,60 @@ class InfluxDBHttpSafetyTest {
         assertTrue(requests.isEmpty(), "The entire batch must fail before the first HTTP write");
     }
 
+    private void assertSingleWritePayload(List<TSDBRecord> records, String expected) {
+        BatchWriteResult result = adapter.batchWriteDetailed(null, records);
+        assertTrue(result.isSuccess());
+        assertEquals(records.size(), result.requestedRecords());
+        assertEquals(records.size(), result.validatedRecords());
+        assertEquals(records.size(), result.committedRecords());
+        assertEquals(1, result.totalBatches());
+        assertEquals(1, result.committedBatches());
+        assertEquals(1, requests.size());
+        assertEquals("POST", requests.get(0).method());
+        assertEquals(expected, new String(requests.get(0).body(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void whitespaceAndPaddedTagValuesRemainDistinctFromTheMissingTagInThePayload() {
+        List<String> values = List.of(" ", "  ", " leading", "trailing ", " both ", " a,b=c ", "\u2003", "\u00a0");
+        List<TSDBRecord> records = new ArrayList<>();
+        for (int index = 0; index < values.size(); index++)
+            records.add(new TSDBRecord("points", 1L, Map.of("device", values.get(index)), Map.of("v", index + 1)));
+        records.add(point(1, 9));
+        String expected = String.join("\n",
+                "points,device=\\  v=1i 1",
+                "points,device=\\ \\  v=2i 1",
+                "points,device=\\ leading v=3i 1",
+                "points,device=trailing\\  v=4i 1",
+                "points,device=\\ both\\  v=5i 1",
+                "points,device=\\ a\\,b\\=c\\  v=6i 1",
+                "points,device=\u2003 v=7i 1",
+                "points,device=\u00a0 v=8i 1",
+                "points v=9i 1");
+        assertSingleWritePayload(records, expected);
+    }
+
+    @Test
+    void nullEmptyTagValuesAndBlankKeysKeepTheirExistingOmission() {
+        List<Map<String, String>> tags = List.of(Collections.emptyMap(), Collections.singletonMap("device", null),
+                Map.of("device", ""), Map.of(" ", "ignored"), Map.of("  ", "ignored"), Map.of("", "ignored"),
+                Map.of("device", "normal"));
+        List<TSDBRecord> records = new ArrayList<>();
+        for (int index = 0; index < tags.size(); index++)
+            records.add(new TSDBRecord("points", 1L, tags.get(index), Map.of("v", index + 1)));
+        assertSingleWritePayload(records, String.join("\n", "points v=1i 1", "points v=2i 1", "points v=3i 1",
+                "points v=4i 1", "points v=5i 1", "points v=6i 1", "points,device=normal v=7i 1"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 9, 10, 13})
+    void controlTagAfterAFullValidRequestRejectsTheEntireBatchBeforeHttp(int codePoint) {
+        TSDBRecord valid = new TSDBRecord("points", 1L, Map.of("device", " "), Map.of("v", 1));
+        List<TSDBRecord> records = new ArrayList<>(Collections.nCopies(5_000, valid));
+        records.add(new TSDBRecord("points", 2L, Map.of("device", Character.toString((char) codePoint)), Map.of("v", 2)));
+        assertUncommittedBeforeIo(records);
+    }
+
     @ParameterizedTest
     @ValueSource(ints = {408, 503, -1})
     void writeFailureNeverReplaysWithDefaultRecoverySettings(int status) {
