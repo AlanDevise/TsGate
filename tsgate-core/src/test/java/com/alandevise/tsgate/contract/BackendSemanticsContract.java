@@ -38,6 +38,20 @@ public interface BackendSemanticsContract {
     TGQueryBuilder<?> semanticsQuery();
     String semanticsMeasurement();
     long semanticsTime();
+
+    /** Fixed native empty-input SUM/COUNT shape for the fixture's server, protocol and schema. */
+    EmptyAggregateExpectation semanticsEmptyAggregateExpectation(AggregationFunctionEnum function);
+
+    record EmptyAggregateValue(boolean present, Number value) { }
+
+    record EmptyAggregateExpectation(List<String> groupedDevices, EmptyAggregateValue groupedValue,
+                                     int ungroupedRows, EmptyAggregateValue ungroupedValue) {
+        public EmptyAggregateExpectation {
+            groupedDevices = List.copyOf(groupedDevices);
+            if (ungroupedRows < 0 || ungroupedRows > 1)
+                throw new IllegalArgumentException("An empty ungrouped aggregate must declare zero or one result row");
+        }
+    }
     void configureSemanticsRowLimit(int rows);
 
     /** Establishes the exact expected points without replaying writes or changing adapter query behavior. */
@@ -277,6 +291,56 @@ public interface BackendSemanticsContract {
         assertEquals(3L, semanticsAdapter().count(null, in.build()));
     }
 
+    @Test
+    default void primaryTimeCaseVariantsPreserveMillisecondsAndOperatorCapabilities() {
+        long time = semanticsTime();
+        List<TSDBRecord> points = List.of(record(time, "case-a", Map.of("value", 1d)),
+                record(time + 1, "case-b", Map.of("value", 2d)));
+        assertTrue(semanticsAdapter().batchWrite(null, points));
+        awaitSemanticsVisibility(points);
+        // InfluxDB 3 quoted names remain case-sensitive; InfluxQL and IoTDB recognize time variants.
+        List<String> columns = semanticsBackendId().equals("influxdb3")
+                ? List.of("time") : List.of("time", "TIME", "Time");
+        for (String column : columns) {
+            for (Object operand : List.of(time, java.time.Instant.ofEpochMilli(time),
+                    java.time.Instant.ofEpochMilli(time).plusNanos(999_999))) {
+                TSDBQuery query = detailQuery();
+                query.setTimeColumn(column);
+                query.setFilters(List.of(new QueryFilter(column, OperatorEnum.EQ, List.of(operand))));
+                List<Map<String, Object>> rows = semanticsAdapter().query(null, query).getRows();
+                assertEquals(1, rows.size(), column + " / " + operand);
+                assertEquals(time, rows.get(0).get("time"));
+                assertEquals(1L, semanticsAdapter().count(null, query));
+                PageResult<Map> page = semanticsQuery().where(column, OperatorEnum.EQ, operand).page(1, 1, Map.class);
+                assertEquals(1L, page.getTotal());
+                assertEquals(1L, page.getTotalPages());
+                assertEquals(1, page.getRows().size());
+                assertEquals(time, page.getRows().get(0).get("time"));
+                assertFalse(page.isHasNext());
+            }
+            for (OperatorEnum operator : List.of(OperatorEnum.NE, OperatorEnum.IN)) {
+                BackendCapability capability = operator == OperatorEnum.NE
+                        ? BackendCapability.TIME_FILTER_NE : BackendCapability.TIME_FILTER_IN;
+                TSDBQuery query = detailQuery();
+                query.setTimeColumn(column);
+                query.setFilters(List.of(new QueryFilter(column, operator,
+                        operator == OperatorEnum.NE ? List.of(time) : List.of(time, time + 1))));
+                if (BackendContractRegistry.profile(semanticsBackendId()).supports(capability)) {
+                    List<Map<String, Object>> rows = semanticsAdapter().query(null, query).getRows();
+                    List<Long> expected = operator == OperatorEnum.NE ? List.of(time + 1) : List.of(time, time + 1);
+                    assertEquals(expected, rows.stream().map(row -> (Long) row.get("time")).toList());
+                    assertEquals(expected.size(), semanticsAdapter().count(null, query));
+                } else {
+                    assertEquals(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION,
+                            assertThrows(TSDBException.class, () -> semanticsAdapter().query(null, query)).getErrorCode());
+                    assertEquals(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION,
+                            assertThrows(TSDBException.class, () -> semanticsAdapter().count(null, query)).getErrorCode());
+                }
+            }
+        }
+        assertEquals(2L, semanticsAdapter().count(null, detailQuery()));
+    }
+
     private boolean supportsSemanticsCapability(BackendCapability capability) {
         prepareSemanticsCapability(capability);
         assertNotNull(semanticsProtocol());
@@ -306,6 +370,73 @@ public interface BackendSemanticsContract {
         assertEquals(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION,
                 assertThrows(TSDBException.class, () -> semanticsAdapter().query(null, query)).getErrorCode());
         assertEquals(1L, semanticsAdapter().count(null, detailQuery()));
+    }
+
+    @Test
+    default void filteredEmptyResultsKeepQueryCountAndOffsetPagesConsistent() {
+        List<TSDBRecord> points = List.of(record(semanticsTime(), "a", Map.of("value", 1d)),
+                record(semanticsTime() + 1, "b", Map.of("value", 2d)));
+        assertTrue(semanticsAdapter().batchWrite(null, points));
+        awaitSemanticsVisibility(points);
+        assertFilteredEmptyResultShape(null, false, 0, null, List.of());
+        for (AggregationFunctionEnum function : List.of(AggregationFunctionEnum.SUM, AggregationFunctionEnum.COUNT)) {
+            EmptyAggregateExpectation expected = semanticsEmptyAggregateExpectation(function);
+            assertNotNull(expected, "The fixture must explicitly declare each function's native empty-input shape");
+            assertNotNull(expected.groupedValue());
+            assertNotNull(expected.ungroupedValue());
+            assertFilteredEmptyResultShape(function, true, expected.groupedDevices().size(),
+                    expected.groupedValue(), expected.groupedDevices());
+            assertFilteredEmptyResultShape(function, false, expected.ungroupedRows(),
+                    expected.ungroupedValue(), List.of());
+        }
+        assertEquals(points.size(), semanticsAdapter().count(null, detailQuery()));
+    }
+
+    private void assertFilteredEmptyResultShape(AggregationFunctionEnum function, boolean grouped,
+                                                int expectedRows, EmptyAggregateValue expectedValue, List<String> expectedDevices) {
+        TSDBQuery query = detailQuery();
+        query.setFilters(List.of(new QueryFilter("value", OperatorEnum.GT, List.of(1_000_000d))));
+        if (function != null) query.setAggregations(List.of(new AggregationSpec("value", function, "empty_value")));
+        if (grouped) query.setGroupByTags(List.of("device"));
+        com.alandevise.tsgate.model.QueryResult result = semanticsAdapter().query(null, query);
+        assertTrue(result.isSuccess());
+        List<Map<String, Object>> rows = result.getRows();
+        assertEquals(expectedRows, result.getRowCount());
+        assertEquals(expectedRows, rows.size());
+        if (grouped) assertEquals(expectedDevices, rows.stream().map(row -> row.get("device")).toList());
+        for (Map<String, Object> row : rows) {
+            assertNotNull(function);
+            assertEquals(expectedValue.present(), row.containsKey("empty_value"));
+            if (expectedValue.present()) {
+                if (expectedValue.value() == null) assertNull(row.get("empty_value"));
+                else assertEquals(expectedValue.value().doubleValue(),
+                        assertInstanceOf(Number.class, row.get("empty_value")).doubleValue());
+            }
+        }
+        assertEquals(expectedRows, semanticsAdapter().count(null, query),
+                "Count must measure emitted result rows rather than an aggregate value or contributing points");
+        for (int pageNumber : List.of(1, Math.max(2, expectedRows + 1))) {
+            List<Map<String, Object>> expectedPageRows = pageNumber == 1
+                    ? rows.subList(0, Math.min(1, rows.size())) : List.of();
+            for (boolean counted : List.of(true, false)) {
+                TGQueryBuilder<?> builder = semanticsQuery().where("value", OperatorEnum.GT, 1_000_000d).orderByTimeAsc();
+                if (function != null) builder.aggregate("value", function, "empty_value");
+                if (grouped) builder.groupByTag("device");
+                PageResult<Map> page = builder.totalPageCount(counted).page(pageNumber, 1, Map.class);
+                assertEquals(expectedPageRows, page.getRows());
+                assertEquals(pageNumber < expectedRows, page.isHasNext());
+                assertEquals(pageNumber, page.getPageNum());
+                assertEquals(1, page.getPageSize());
+                assertEquals(pageNumber - 1, page.getOffset());
+                if (counted) {
+                    assertEquals((long) expectedRows, page.getTotal());
+                    assertEquals((long) expectedRows, page.getTotalPages());
+                } else {
+                    assertNull(page.getTotal());
+                    assertNull(page.getTotalPages());
+                }
+            }
+        }
     }
 
     @Test

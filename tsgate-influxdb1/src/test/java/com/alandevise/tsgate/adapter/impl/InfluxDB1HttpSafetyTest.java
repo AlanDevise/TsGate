@@ -393,11 +393,13 @@ class InfluxDB1HttpSafetyTest {
     @ValueSource(booleans = {false, true})
     void timeFiltersUseMillisecondsAndPreserveCaseDistinctFields(boolean countOnly) throws Exception {
         TSDBQuery query = filteredQuery("time", 1783000000000L);
-        query.getFilters().add(new QueryFilter("TIME", OperatorEnum.EQ, List.of(7)));
+        query.getFilters().add(new QueryFilter("VALUE", OperatorEnum.EQ, List.of(7)));
+        query.getFilters().add(new QueryFilter("value", OperatorEnum.EQ, List.of(8)));
         completeEmptyRead(query, countOnly);
         String sql = lastQuery();
         assertTrue(sql.contains("\"time\" = '2026-07-02T13:46:40Z'"), sql);
-        assertTrue(sql.contains("\"TIME\" = 7"), sql);
+        assertTrue(sql.contains("\"VALUE\" = 7"), sql);
+        assertTrue(sql.contains("\"value\" = 8"), sql);
 
         int beforeInvalidTime = requests.size();
         TSDBQuery textTimeQuery = filteredQuery("time", "1783000000000");
@@ -454,21 +456,24 @@ class InfluxDB1HttpSafetyTest {
     @ValueSource(strings = {"NE", "IN"})
     void unsupportedPrimaryTimeFiltersFailBeforeQueryOrCountIo(String operatorName) {
         OperatorEnum operator = OperatorEnum.valueOf(operatorName);
-        for (boolean instant : List.of(false, true)) {
-            List<Object> values = operator == OperatorEnum.IN
-                    ? List.of(1783000000000L, 1783000000002L) : List.of(1783000000001L);
-            if (instant) values = values.stream().map(value -> (Object) Instant.ofEpochMilli((Long) value)).toList();
-            TSDBQuery query = new TSDBQuery();
-            query.setMeasurement("points");
-            query.setFilters(List.of(new QueryFilter("time", operator, values)));
-            for (boolean countOnly : List.of(false, true)) {
-                TSDBException error = assertThrows(TSDBException.class, () -> {
-                    if (countOnly) adapter.count(null, query);
-                    else adapter.query(null, query);
-                });
-                assertEquals(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION, error.getErrorCode());
-                assertTrue(error.getMessage().contains("primary-time NE and IN"), error.getMessage());
-                assertTrue(requests.isEmpty());
+        for (String column : List.of("time", "TIME", "Time")) {
+            for (boolean instant : List.of(false, true)) {
+                List<Object> values = operator == OperatorEnum.IN
+                        ? List.of(1783000000000L, 1783000000002L) : List.of(1783000000001L);
+                if (instant) values = values.stream().map(value -> (Object) Instant.ofEpochMilli((Long) value)).toList();
+                TSDBQuery query = new TSDBQuery();
+                query.setMeasurement("points");
+                query.setTimeColumn(column);
+                query.setFilters(List.of(new QueryFilter(column, operator, values)));
+                for (boolean countOnly : List.of(false, true)) {
+                    TSDBException error = assertThrows(TSDBException.class, () -> {
+                        if (countOnly) adapter.count(null, query);
+                        else adapter.query(null, query);
+                    });
+                    assertEquals(TSDBErrorCodeEnum.UNSUPPORTED_OPERATION, error.getErrorCode());
+                    assertTrue(error.getMessage().contains("primary-time NE and IN"), error.getMessage());
+                    assertTrue(requests.isEmpty());
+                }
             }
         }
     }
@@ -477,7 +482,7 @@ class InfluxDB1HttpSafetyTest {
     @ValueSource(strings = {"NE", "IN"})
     void ordinaryFieldsKeepExistingNotEqualAndMembershipSql(String operatorName) throws Exception {
         OperatorEnum operator = OperatorEnum.valueOf(operatorName);
-        for (String column : List.of("v", "TIME")) {
+        for (String column : List.of("v", "VALUE")) {
             for (boolean countOnly : List.of(false, true)) {
                 TSDBQuery query = new TSDBQuery();
                 query.setMeasurement("points");
@@ -487,6 +492,40 @@ class InfluxDB1HttpSafetyTest {
                 String expected = operator == OperatorEnum.NE ? "\"" + column + "\" != 1"
                         : "(\"" + column + "\" = 1 OR \"" + column + "\" = 3)";
                 assertTrue(lastQuery().contains(expected), lastQuery());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"time", "TIME", "Time"})
+    void primaryTimeCaseVariantsEncodeLongAndInstantIdentically(String column) {
+        long millis = 1783000000000L;
+        for (Object value : List.of(millis, Instant.ofEpochMilli(millis))) {
+            for (boolean countOnly : List.of(false, true)) {
+                TSDBQuery query = filteredQuery(column, value);
+                query.setTimeColumn(column);
+                completeEmptyRead(query, countOnly);
+                String expected = "\"" + column + "\" = '2026-07-02T13:46:40Z'";
+                assertTrue(lastQuery().contains(expected), lastQuery());
+                assertEquals(column, query.getTimeColumn());
+                assertSame(value, query.getFilters().get(0).values().get(0));
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"time", "TIME", "Time"})
+    void invalidPrimaryTimeOperandsFailBeforeIoForEveryCaseVariant(String column) {
+        for (Object value : List.of(new java.math.BigDecimal("1.5"), "1783000000000", "2026-07-02T13:46:40Z", true)) {
+            TSDBQuery query = filteredQuery(column, value);
+            query.setTimeColumn(column);
+            for (boolean countOnly : List.of(false, true)) {
+                TSDBException error = assertThrows(TSDBException.class, () -> {
+                    if (countOnly) adapter.count(null, query);
+                    else adapter.query(null, query);
+                });
+                assertEquals(TSDBErrorCodeEnum.ARGUMENT_ERROR, error.getErrorCode());
+                assertTrue(requests.isEmpty());
             }
         }
     }

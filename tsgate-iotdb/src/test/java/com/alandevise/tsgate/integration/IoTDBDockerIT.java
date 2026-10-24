@@ -39,6 +39,14 @@ class IoTDBDockerIT extends DatabaseContractIT implements com.alandevise.tsgate.
     @Override public com.alandevise.tsgate.core.TGQueryBuilder<?> semanticsQuery() { return template.query(Telemetry.class); }
     @Override public String semanticsMeasurement() { return "telemetry"; }
     @Override public long semanticsTime() { return BASE; }
+    @Override public EmptyAggregateExpectation semanticsEmptyAggregateExpectation(AggregationFunctionEnum function) {
+        EmptyAggregateValue absent = new EmptyAggregateValue(false, null);
+        return switch (function) {
+            case SUM -> new EmptyAggregateExpectation(List.of(), absent, 1, new EmptyAggregateValue(true, null));
+            case COUNT -> new EmptyAggregateExpectation(List.of(), absent, 1, new EmptyAggregateValue(true, 0L));
+            default -> throw new IllegalArgumentException("Empty-input acceptance declares SUM and COUNT separately");
+        };
+    }
     @Override public void awaitSemanticsVisibility(List<TSDBRecord> expected) {
         // This RPC fixture tests acknowledged writes against the configured IoTDB server version.
     }

@@ -26,6 +26,14 @@ class InfluxDB1DockerIT implements com.alandevise.tsgate.contract.BackendSemanti
     @Override public com.alandevise.tsgate.core.TGQueryBuilder<?> semanticsQuery() { return template.query(Point.class); }
     @Override public String semanticsMeasurement() { return "points"; }
     @Override public long semanticsTime() { return base; }
+    @Override public EmptyAggregateExpectation semanticsEmptyAggregateExpectation(AggregationFunctionEnum function) {
+        EmptyAggregateValue absent = new EmptyAggregateValue(false, null);
+        return switch (function) {
+            case SUM -> new EmptyAggregateExpectation(List.of(), absent, 0, absent);
+            case COUNT -> new EmptyAggregateExpectation(List.of(), absent, 0, absent);
+            default -> throw new IllegalArgumentException("Empty-input acceptance declares SUM and COUNT separately");
+        };
+    }
     @Override public void awaitSemanticsVisibility(List<TSDBRecord> expected) {
         // This HTTP fixture tests acknowledged writes against the configured InfluxDB 1.x version.
     }

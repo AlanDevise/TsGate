@@ -681,7 +681,7 @@ public class InfluxDB1Adapter implements TSDBAdapter {
         if (filter == null || isBlank(filter.column()) || filter.operator() == null || filter.values() == null || filter.values().isEmpty())
             throw new TSDBException(TSDBErrorCodeEnum.ARGUMENT_ERROR, "Invalid InfluxDB1 query filter");
         String column = quoteIdentifier(filter.column());
-        boolean timeColumn = "time".equals(filter.column());
+        boolean timeColumn = "time".equalsIgnoreCase(filter.column());
         if (timeColumn && (filter.operator() == OperatorEnum.NE || filter.operator() == OperatorEnum.IN)) {
             throw unsupported("InfluxQL primary-time NE and IN filters are unsupported");
         }

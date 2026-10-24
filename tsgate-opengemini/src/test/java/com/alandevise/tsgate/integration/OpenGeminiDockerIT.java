@@ -36,6 +36,14 @@ class OpenGeminiDockerIT implements com.alandevise.tsgate.contract.BackendSemant
     @Override public com.alandevise.tsgate.core.TGQueryBuilder<?> semanticsQuery() { return template.query(Point.class); }
     @Override public String semanticsMeasurement() { return "points"; }
     @Override public long semanticsTime() { return base; }
+    @Override public EmptyAggregateExpectation semanticsEmptyAggregateExpectation(AggregationFunctionEnum function) {
+        EmptyAggregateValue absent = new EmptyAggregateValue(false, null);
+        return switch (function) {
+            case SUM -> new EmptyAggregateExpectation(List.of(), absent, 0, absent);
+            case COUNT -> new EmptyAggregateExpectation(List.of(), absent, 0, absent);
+            default -> throw new IllegalArgumentException("Empty-input acceptance declares SUM and COUNT separately");
+        };
+    }
     @Override public void awaitSemanticsVisibility(List<TSDBRecord> expected) { awaitVisible(expected); }
     @Override public void configureSemanticsRowLimit(int rows) { initialize(rows, 16L * 1024 * 1024); }
 

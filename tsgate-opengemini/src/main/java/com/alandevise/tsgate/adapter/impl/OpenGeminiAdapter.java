@@ -333,7 +333,7 @@ public class OpenGeminiAdapter implements TSDBAdapter {
         if (query == null || query.getFilters() == null) return;
         for (QueryFilter filter : query.getFilters()) {
             if (filter == null) continue; // Leave ordinary model validation to the delegate.
-            if ("time".equals(filter.column())) continue; // Timestamp literals do not pass through float64.
+            if ("time".equalsIgnoreCase(filter.column())) continue; // Timestamp literals do not pass through float64.
             for (Object value : filter.values()) {
                 if (!(value instanceof Number number) || value instanceof Float || value instanceof Double) continue;
                 BigDecimal decimal;
